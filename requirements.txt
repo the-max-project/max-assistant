@@ -15,6 +15,8 @@ neo4j
 nest_asyncio
 ollama
 pydantic
+pytest
+pytest-asyncio
 python-dotenv
 tiktoken
 uvicorn[standard]
