@@ -23,6 +23,68 @@ from max_assistant.utils.decorators import requires_db
 
 logger = logging.getLogger(__name__)
 
+flat_schema = """
+Node Labels & Properties:
+- Appointment: id, title, details, date, time, duration
+- DailyRoutine: id, title, type, details, room, rating, time, duration, dayOfWeek, startDate
+- Day: day, month, year
+- Family: id, firstName, lastName, gender, phone, email, notes, dob, dod
+- Friend: id, firstName, lastName, gender, phone, email, notes, dob
+- Location: id, name, address, type, room
+- Month: name, month, year
+- Person: id, firstName, lastName, title, userName, gender, phone, email, notes, dob, dod, startDate, endDate
+- Support: id, title, firstName, lastName, phone, email, notes, startDate, endDate
+- User: id, userName, firstName, lastName, gender, phone, email, notes, dob
+- Year: year
+
+Allowed Relationship Patterns:
+(:Day)-[:HAS_APPOINTMENT]->(:Appointment)
+(:Family)-[:LIVES_AT]->(:Location)
+(:Family)-[:LIVES_WITH]->(:Family)
+(:Family)-[:LIVES_WITH]->(:Person)
+(:Family)-[:MARRIED_TO]->(:Family)
+(:Family)-[:MARRIED_TO]->(:Person)
+(:Family)-[:PARENT_OF]->(:Family)
+(:Family)-[:PARENT_OF]->(:Person)
+(:Family)-[:PARENT_OF]->(:User)
+(:Family)-[:PARTNER_OF]->(:Family)
+(:Family)-[:PARTNER_OF]->(:Person)
+(:Friend)-[:FRIEND_OF]->(:Friend)
+(:Friend)-[:FRIEND_OF]->(:Person)
+(:Friend)-[:LIVES_AT]->(:Location)
+(:Friend)-[:MARRIED_TO]->(:Person)
+(:Friend)-[:PARENT_OF]->(:Person)
+(:Month)-[:HAS_DAY]->(:Day)
+(:Person)-[:ATTENDS]->(:DailyRoutine)
+(:Person)-[:FRIEND_OF]->(:Friend)
+(:Person)-[:FRIEND_OF]->(:Person)
+(:Person)-[:HAS_YEAR]->(:Year)
+(:Person)-[:LIVES_AT]->(:Location)
+(:Person)-[:LIVES_WITH]->(:Family)
+(:Person)-[:LIVES_WITH]->(:Person)
+(:Person)-[:MARRIED_TO]->(:Family)
+(:Person)-[:MARRIED_TO]->(:Person)
+(:Person)-[:PARENT_OF]->(:Family)
+(:Person)-[:PARENT_OF]->(:Person)
+(:Person)-[:PARENT_OF]->(:User)
+(:Person)-[:PARTNER_OF]->(:Family)
+(:Person)-[:PARTNER_OF]->(:Person)
+(:Person)-[:SUPPORTED_BY]->(:Person)
+(:Person)-[:SUPPORTED_BY]->(:Support)
+(:User)-[:ATTENDS]->(:DailyRoutine)
+(:User)-[:FRIEND_OF]->(:Friend)
+(:User)-[:FRIEND_OF]->(:Person)
+(:User)-[:HAS_YEAR]->(:Year)
+(:User)-[:LIVES_AT]->(:Location)
+(:User)-[:MARRIED_TO]->(:Family)
+(:User)-[:MARRIED_TO]->(:Person)
+(:User)-[:PARENT_OF]->(:Family)
+(:User)-[:PARENT_OF]->(:Person)
+(:User)-[:SUPPORTED_BY]->(:Person)
+(:User)-[:SUPPORTED_BY]->(:Support)
+(:Year)-[:HAS_MONTH]->(:Month)
+"""
+
 
 class GeneralQueryTools(BaseToolProvider):
     """
@@ -44,6 +106,9 @@ class GeneralQueryTools(BaseToolProvider):
         RAW_CYPHER_PROMPT = PromptTemplate.from_template("""
         You are a Neo4j Cypher expert. Write a single, read-only Cypher query to answer the user's question.
 
+        User Context:
+        - The current user's ID is provided as parameter: $user_id
+
         Schema Context:
         {schema}
 
@@ -51,8 +116,10 @@ class GeneralQueryTools(BaseToolProvider):
 
         CRITICAL RULES:
         - Output ONLY the raw Cypher query.
+        - Always use parameter $user_id when referring to the current user (e.g., MATCH (u:User {{id:$user_id}})).
         - Wrap the query in a ```cypher code block.
         - DO NOT include <think> tags, reasoning, or explanations.
+        - Do NOT include explanations, reasoning, or markdown outside the code block.
         """)
 
         # Bind the prompt to the raw completion model
@@ -104,7 +171,8 @@ class GeneralQueryTools(BaseToolProvider):
 
             # Check for error in schema fetching
             try:
-                schema_data = json.loads(schema_str)
+                # schema_data = json.loads(schema_str)
+                schema_data = flat_schema
                 if isinstance(schema_data, dict) and "error" in schema_data:
                     logger.error(f"Error retrieving graph schema: {schema_data}")
                     return json.dumps(

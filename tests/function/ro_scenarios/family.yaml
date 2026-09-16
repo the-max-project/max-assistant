@@ -12,9 +12,6 @@ margaret_family:
     - user_input: "What are the names of my grandchildren?"
       validators:
         - substrings_present_all: ["Emily", "Ryan", "Olivia"]
-    - user_input: "Do I have great grandchildren? If so what are their names?"
-      validators:
-        - substring_present: "Anne"
     - user_input: "I have forgotten the names of my parents"
       validators:
         - substrings_present_all: ["Eleanor", "Smith", "Robert"]
@@ -28,6 +25,13 @@ margaret_family:
       validators:
         - semantic_criteria:
             - Verify that Margaret does not have a sister or that there is no record of a sibling who is a sister
+
+margaret_family_advanced:
+  username: "Margaret.Miller"
+  steps:
+    - user_input: "Do I have great grandchildren? If so what are their names?"
+      validators:
+        - substring_present: "Anne"
 
 margaret_in_laws:
   username: "Margaret.Miller"

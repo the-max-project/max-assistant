@@ -9,6 +9,10 @@ margaret_friends:
       validators:
         - semantic_criteria:
             - Verify david is not a friend, but rather a support worker or nurse
+
+margaret_friends_advanced:
+  username: "Margaret.Miller"
+  steps:
     - user_input: "which of my friends are older than i am"
       validators:
         - substrings_present_all:
