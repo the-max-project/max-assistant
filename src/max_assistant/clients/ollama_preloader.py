@@ -4,6 +4,7 @@ import asyncio
 import logging
 from typing import Optional
 
+import ollama
 from langchain_ollama import ChatOllama
 from langchain_core.runnables import RunnableConfig
 from langchain_core.output_parsers import StrOutputParser
@@ -11,6 +12,37 @@ from langchain_core.output_parsers import StrOutputParser
 from max_assistant.utils.log_utils import log_banner
 
 logger = logging.getLogger(__name__)
+
+
+def validate_model_capabilities(
+        model_name: str,
+        base_url: str,
+        required_capabilities: tuple[str, ...] = ("tools",),
+) -> None:
+    """
+    Fails fast at startup if the configured model is missing or doesn't support
+    what the reasoning graph needs (e.g. tool calling), instead of letting the
+    container come up healthy and crash on the first user turn.
+    """
+    try:
+        info = ollama.Client(host=base_url).show(model_name)
+    except ollama.ResponseError as e:
+        raise RuntimeError(
+            f"OLLAMA_MODEL_NAME='{model_name}' could not be loaded from '{base_url}': {e}. "
+            f"Check the model name/tag is correct and has been pulled (`ollama pull {model_name}`)."
+        ) from e
+
+    capabilities = set(info.capabilities or [])
+    missing = [c for c in required_capabilities if c not in capabilities]
+    if missing:
+        raise RuntimeError(
+            f"OLLAMA_MODEL_NAME='{model_name}' does not support required capability(ies) "
+            f"{missing} (reports: {sorted(capabilities)}). The reasoning graph binds tools on "
+            f"every interactive turn, so this model would crash on the first message. "
+            f"Choose a model whose `ollama show {model_name}` output lists 'tools' under Capabilities."
+        )
+
+    logger.info(f"✅ Model '{model_name}' validated — capabilities: {sorted(capabilities)}")
 
 
 def create_llm_instance(
@@ -27,6 +59,8 @@ def create_llm_instance(
     logger.info(f"   Model: {model_name}")
     logger.info(f"   Target: {base_url}")
     logger.info("=" * 50)
+
+    validate_model_capabilities(model_name, base_url)
 
     llm = ChatOllama(
         model=model_name,
