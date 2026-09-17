@@ -85,6 +85,21 @@ Allowed Relationship Patterns:
 (:Year)-[:HAS_MONTH]->(:Month)
 """
 
+static_examples = """
+Question: Who lives with me?
+Cypher:
+```cypher
+MATCH (u:Person {{id: $user_id}})-[:LIVES_WITH]-(housemate:Person)
+RETURN housemate.firstName AS firstName, housemate.lastName AS lastName, labels(housemate) AS roles
+```
+
+Question: Find all active support personnel or individuals providing support to me.
+Cypher:
+```MATCH (u:User {id: $userId})-[:SUPPORTED_BY]->(s)
+RETURN labels(s) AS label, s.id AS id, s.firstName AS firstName, s.lastName AS lastName, s.title AS title, s.phone AS phone, s.email AS email, s.startDate AS startDate, s.endDate AS endDate, s.notes AS notes
+```
+"""
+
 
 class GeneralQueryTools(BaseToolProvider):
     """
@@ -107,7 +122,7 @@ class GeneralQueryTools(BaseToolProvider):
         You are a Neo4j Cypher expert. Write a single, read-only Cypher query to answer the user's question.
 
         User Context:
-        - The current user's ID is provided as parameter: $user_id
+        - When referring to the current user, use the query parameter: $user_id
 
         Schema Context:
         {schema}
@@ -116,10 +131,20 @@ class GeneralQueryTools(BaseToolProvider):
 
         CRITICAL RULES:
         - Output ONLY the raw Cypher query.
-        - Always use parameter $user_id when referring to the current user (e.g., MATCH (u:User {{id:$user_id}})).
+        - Always use parameter $user_id when referring to the current user 
         - Wrap the query in a ```cypher code block.
         - DO NOT include <think> tags, reasoning, or explanations.
         - Do NOT include explanations, reasoning, or markdown outside the code block.
+        Core Node Rule: All people (User, Family, Friend, Support) share the `:Person` label.
+        - For general people lookups, relationships, and name searches, always match `(p:Person)`.
+        - Use secondary labels ONLY when specifically asked:
+          - Current User: MATCH (u:User {{id: $user_id}}) or (u:Person {{id: $user_id}})
+          - Only friends: MATCH (p:Person:Friend)
+          - Only family: MATCH (p:Person:Family)
+          - Only support workers: MATCH (p:Person:Support)
+          
+        Examples:
+        {examples}  
         """)
 
         # Bind the prompt to the raw completion model
@@ -167,7 +192,8 @@ class GeneralQueryTools(BaseToolProvider):
 
         try:
             # 1. Get the graph schema
-            schema_str = await self.db_client.get_schema()
+            # schema_str = await self.db_client.get_schema()
+            schema_str = flat_schema
 
             # Check for error in schema fetching
             try:
@@ -189,8 +215,9 @@ class GeneralQueryTools(BaseToolProvider):
                     self.cypher_generation_chain.ainvoke({
                         "schema": schema_str,
                         "question": question,
+                        "examples": static_examples,
                     }),
-                    timeout=20.0
+                    timeout=90.0
                 )
             except asyncio.TimeoutError:
                 logger.error("LLM Cypher generation timed out.")
