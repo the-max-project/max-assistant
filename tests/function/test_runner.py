@@ -86,12 +86,18 @@ async def execute_scenario_workflow(
 
             # Fire off pluggable validators conditionally
             for validator_fn in validators:
+                # use the same model for validation as the one under test
+                sig = inspect.signature(validator_fn)
+                kwargs = {}
+                if "model_name" in sig.parameters:
+                    kwargs["model_name"] = model_name
+
                 if inspect.iscoroutinefunction(validator_fn):
                     # Natively await async validators (like semantic evaluations or graph checks)
-                    await validator_fn(actual_response, app_services.db_client)
+                    await validator_fn(actual_response, app_services.db_client, **kwargs)
                 else:
                     # Execute standard synchronous substring/regex assertions directly
-                    validator_fn(actual_response, app_services.db_client)
+                    validator_fn(actual_response, app_services.db_client, **kwargs)
 
             step_results.append(StepResult(
                 step=index,
