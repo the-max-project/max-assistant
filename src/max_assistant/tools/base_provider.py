@@ -92,6 +92,11 @@ class BaseToolProvider:
                 logger.warning(f"Some records were skipped because they missed the key '{result_key}'")
 
             validated_nodes = [model_class.model_validate(node) for node in raw_nodes]
+            if not validated_nodes:
+                logger.info(f"No valid records found")
+                return "No valid records found."
+
+            logger.info(f"Successfully validated {len(validated_nodes)} records")
 
             return json.dumps(
                 [node.model_dump(mode='json') for node in validated_nodes],

@@ -10,8 +10,9 @@ import logging
 import asyncio
 from typing import Annotated
 
-from langchain_ollama import OllamaLLM, ChatOllama
-from langchain_core.prompts import PromptTemplate
+from langchain_ollama import ChatOllama
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 from langchain_core.tools import StructuredTool
 from langgraph.prebuilt import InjectedState
 
@@ -95,7 +96,7 @@ RETURN housemate.firstName AS firstName, housemate.lastName AS lastName, labels(
 
 Question: Find all active support personnel or individuals providing support to me.
 Cypher:
-```MATCH (u:User {id: $userId})-[:SUPPORTED_BY]->(s)
+```MATCH (u:User {id: $user_id})-[:SUPPORTED_BY]->(s)
 RETURN labels(s) AS label, s.id AS id, s.firstName AS firstName, s.lastName AS lastName, s.title AS title, s.phone AS phone, s.email AS email, s.startDate AS startDate, s.endDate AS endDate, s.notes AS notes
 ```
 """
@@ -114,12 +115,9 @@ class GeneralQueryTools(BaseToolProvider):
         if llm is None:
             raise ValueError("GeneralQueryTools strictly requires an LLM instance.")
 
-        # Create a raw text completion LLM pointing to the exact same model
-        raw_llm = OllamaLLM(model=llm.model)
-
         # Use a standard string template, avoiding Chat roles entirely
-        RAW_CYPHER_PROMPT = PromptTemplate.from_template("""
-        You are a Neo4j Cypher expert. Write a single, read-only Cypher query to answer the user's question.
+        CHAT_CYPHER_PROMPT = ChatPromptTemplate.from_messages([
+            ("system", """ You are a Neo4j Cypher expert. Write a single, read-only Cypher query to answer the user's question.
 
         User Context:
         - When referring to the current user, use the query parameter: $user_id
@@ -127,9 +125,8 @@ class GeneralQueryTools(BaseToolProvider):
         Schema Context:
         {schema}
 
-        User Question: {question}
-
         CRITICAL RULES:
+        - You must answer directly without thinking. Do NOT include <think> or <thought> tags.
         - Output ONLY the raw Cypher query.
         - Always use parameter $user_id when referring to the current user 
         - Wrap the query in a ```cypher code block.
@@ -145,30 +142,40 @@ class GeneralQueryTools(BaseToolProvider):
           
         Examples:
         {examples}  
-        """)
+        """),
+            ("human", "{question}")
+        ])
 
-        # Bind the prompt to the raw completion model
-        self.cypher_generation_chain = RAW_CYPHER_PROMPT | raw_llm
-        logger.debug("GeneralQueryTools initialized with raw OllamaLLM generator.")
+        self.bound_llm = llm.bind(
+            options={
+                "temperature": 0.0,
+                "num_predict": 2048,
+            },
+        )
+        self.cypher_generation_chain = CHAT_CYPHER_PROMPT | self.bound_llm
+        logger.debug("GeneralQueryTools initialized.")
 
+    @staticmethod
     @staticmethod
     def _parse_cypher_from_response(response_content: str) -> str:
         """
         Safely extracts a Cypher query from an LLM's markdown response.
         """
-        # Look for a Cypher code block
-        match = re.search(r"```(?:cypher|CYPHER)?\s*\n(.*?)\n\s*```", response_content, re.DOTALL)
-        if match:
-            return match.group(1).strip()
+        text = response_content.strip()
 
-        # Fallback: if no code block, assume the whole response is the query
-        # but clean it of common LLM "chatter"
-        query = response_content.strip()
-        if query.startswith("MATCH") or query.startswith("RETURN"):
-            return query
+        # Match standard markdown code block
+        match = re.search(r"```(?:cypher|CYPHER)?\s*(.*?)\s*```", text, re.DOTALL)
+        if match:
+            query = match.group(1).strip()
+            if query:
+                return query
+
+        # Fallback: if markdown block wasn't closed or no backticks were used
+        cleaned = re.sub(r"^```(?:cypher)?\s*", "", text, flags=re.IGNORECASE).strip()
+        if cleaned.startswith("MATCH") or cleaned.startswith("RETURN") or cleaned.startswith("WITH"):
+            return cleaned
 
         logger.warning(f"Could not parse Cypher from LLM response: {response_content}")
-        # Return a query that will gracefully fail
         return "RETURN 'Error: Could not parse Cypher query from LLM response'"
 
     @requires_db
@@ -210,8 +217,8 @@ class GeneralQueryTools(BaseToolProvider):
             # 2. Generate the Cipher query
             logger.debug("Generating Cypher query...")
             try:
-                # Force a 10-second hard limit on generation
-                response_text = await asyncio.wait_for(
+                # Force a 90-second hard limit on generation
+                ai_response = await asyncio.wait_for(
                     self.cypher_generation_chain.ainvoke({
                         "schema": schema_str,
                         "question": question,
@@ -223,10 +230,20 @@ class GeneralQueryTools(BaseToolProvider):
                 logger.error("LLM Cypher generation timed out.")
                 return json.dumps({"error": "Query generation took too long."})
 
+            # Handle both string output and AIMessage objects safely
+            raw_text = ai_response.content if hasattr(ai_response, "content") else str(ai_response)
+            logger.info(f"RAW LLM CYPHER RESPONSE:\n{raw_text}")
 
-            logger.info(f"RAW LLM CYPHER RESPONSE:\n{response_text}")
+            # If the model put the entire response inside think tags, strip them
+            clean_text = re.sub(r"<think>.*?</think>", "", raw_text, flags=re.DOTALL).strip()
 
-            cypher_query = self._parse_cypher_from_response(response_text)
+            # If content was empty, check additional_kwargs or fallback
+            if not clean_text and hasattr(ai_response, "additional_kwargs"):
+                clean_text = ai_response.additional_kwargs.get("thinking", "").strip()
+
+            logger.info(f"Clean LLM CYPHER RESPONSE:\n{clean_text}")
+
+            cypher_query = self._parse_cypher_from_response(clean_text)
             logger.info(f"Generated Cypher: {cypher_query}")
 
             # 3. Execute the query
