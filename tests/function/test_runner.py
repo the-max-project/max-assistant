@@ -1,12 +1,40 @@
+import asyncio
 import inspect
+import json
 import time
 import unicodedata
 from typing import List, Dict, Any, Optional
+from urllib import request
 
 from max_assistant.app_services import AppServices
 from max_assistant.agent.agent import Agent
+from max_assistant.config import OLLAMA_BASE_URL
 from max_assistant.tools import PersonTools
 from tests.function.types import ScenarioResult, StepResult
+
+# Global tracker for the model currently resident in memory
+_ACTIVE_MODEL: Optional[str] = None
+
+
+async def unload_ollama_model(model_name: str, base_url: str = OLLAMA_BASE_URL) -> None:
+    """Sends keep_alive: 0 to Ollama's generate API to immediately evict the model from VRAM."""
+    def _post_unload():
+        endpoint = f"{base_url.rstrip('/')}/api/generate"
+        payload = json.dumps({"model": model_name, "keep_alive": 0}).encode("utf-8")
+        req = request.Request(
+            endpoint,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=10.0) as resp:
+                resp.read()
+            print(f"[OLLAMA] Successfully evicted model '{model_name}' from VRAM.")
+        except Exception as exc:
+            print(f"[OLLAMA WARN] Failed to evict model '{model_name}': {exc}")
+
+    await asyncio.to_thread(_post_unload)
 
 
 async def execute_scenario_workflow(
@@ -21,11 +49,20 @@ async def execute_scenario_workflow(
     A test execution engine for chat scenarios defined in an injection array.
     Supports both synchronous token validators and asynchronous semantic/graph validators.
     """
+    global _ACTIVE_MODEL
+
+    # Evict the prior model when the model changes across scenario runs
+    if _ACTIVE_MODEL is not None and _ACTIVE_MODEL != model_name:
+        print(f"\n[MODEL ROTATION] Switching from '{_ACTIVE_MODEL}' to '{model_name}'. Unloading previous model...")
+        await unload_ollama_model(_ACTIVE_MODEL)
+
+    _ACTIVE_MODEL = model_name
+
     testcase_name = "Unknown_Test_Case"
     if request is not None and hasattr(request, "node"):
         testcase_name = request.node.name
 
-    app_services = await AppServices.create(model_name=model_name)
+        app_services = await AppServices.create(model_name=model_name)
     execution_times: List[float ] = []
     responses: List[str] = []
     success = False
