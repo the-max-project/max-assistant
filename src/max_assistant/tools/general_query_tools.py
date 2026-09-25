@@ -37,8 +37,8 @@ class GeneralQueryTools(BaseToolProvider):
         if llm is None:
             raise ValueError("GeneralQueryTools strictly requires an LLM instance.")
 
-        # Create a raw text completion LLM pointing to the exact same model
-        raw_llm = OllamaLLM(model=llm.model)
+        # Create a raw text completion LLM pointing to the exact same model and host
+        raw_llm = OllamaLLM(model=llm.model, base_url=llm.base_url)
 
         # Use a standard string template, avoiding Chat roles entirely
         RAW_CYPHER_PROMPT = PromptTemplate.from_template("""
