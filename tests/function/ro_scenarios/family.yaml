@@ -24,7 +24,7 @@ margaret_family:
     - user_input: "Do I have a sister"
       validators:
         - semantic_criteria:
-            - Verify that Margaret does not have a sister or that there is no record of a sibling who is a sister
+            - Verify the user does not have a sister or that there is no record of a sibling who is a sister
 
 margaret_family_advanced:
   username: "Margaret.Miller"

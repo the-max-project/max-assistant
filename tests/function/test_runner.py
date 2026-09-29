@@ -11,6 +11,7 @@ from max_assistant.agent.agent import Agent
 from max_assistant.config import OLLAMA_BASE_URL
 from max_assistant.tools import PersonTools
 from tests.function.types import ScenarioResult, StepResult
+from tests.function.conftest import SEMANTIC_VALIDATOR_MODEL
 
 # Global tracker for the model currently resident in memory
 _ACTIVE_MODEL: Optional[str] = None
@@ -127,7 +128,7 @@ async def execute_scenario_workflow(
                 sig = inspect.signature(validator_fn)
                 kwargs = {}
                 if "model_name" in sig.parameters:
-                    kwargs["model_name"] = model_name
+                    kwargs["model_name"] = SEMANTIC_VALIDATOR_MODEL or model_name
 
                 if inspect.iscoroutinefunction(validator_fn):
                     # Natively await async validators (like semantic evaluations or graph checks)
