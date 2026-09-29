@@ -147,6 +147,7 @@ class GeneralQueryTools(BaseToolProvider):
         ])
 
         self.bound_llm = llm.bind(
+            model="gemma4:E4B",
             options={
                 "temperature": 0.0,
                 "num_predict": 2048,
@@ -230,6 +231,27 @@ class GeneralQueryTools(BaseToolProvider):
                 logger.error("LLM Cypher generation timed out.")
                 return json.dumps({"error": "Query generation took too long."})
 
+            # --- CHECK FINISH REASON ---
+            metadata = getattr(ai_response, "response_metadata", {})
+            # Ollama populates 'done_reason'; OpenAI/standard providers use 'finish_reason'
+            finish_reason = (
+                    metadata.get("done_reason")
+                    or metadata.get("finish_reason")
+                    or getattr(ai_response, "additional_kwargs", {}).get("finish_reason")
+            )
+
+            if finish_reason == "length":
+                eval_count = metadata.get("eval_count", "unknown")
+                logger.error(
+                    f"ABNORMAL TERMINATION: Cypher generation ended due to TOKEN EXHAUSTION "
+                    f"(hit num_predict limit of {eval_count} tokens)."
+                )
+            elif finish_reason not in ("stop", None):
+                logger.warning(
+                    f"ABNORMAL TERMINATION: Cypher generation stopped unexpectedly with reason: '{finish_reason}'.")
+            else:
+                logger.debug(f"Cypher generation completed normally (reason: {finish_reason}).")
+
             # Handle both string output and AIMessage objects safely
             raw_text = ai_response.content if hasattr(ai_response, "content") else str(ai_response)
             logger.info(f"RAW LLM CYPHER RESPONSE:\n{raw_text}")
@@ -244,11 +266,12 @@ class GeneralQueryTools(BaseToolProvider):
             logger.info(f"Clean LLM CYPHER RESPONSE:\n{clean_text}")
 
             cypher_query = self._parse_cypher_from_response(clean_text)
-            logger.info(f"Generated Cypher: {cypher_query}")
+            logger.info(f"Generated Cypher:\n{cypher_query}")
 
             # 3. Execute the query
             # We use params={} as the LLM is instructed to embed values
             result = await self.db_client.execute_query(cypher_query, params=params)
+            logger.debug(f"Query Results:\n{result}")
 
             # 4. Return the raw JSON string
             return json.dumps(result, indent=2, default=str)
