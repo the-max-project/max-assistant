@@ -40,6 +40,8 @@ MODELS_TO_TEST = [
     for model in os.getenv("TEST_MODELS", OLLAMA_MODEL_NAME).split(",")
 ]
 
+SEMANTIC_VALIDATOR_MODEL = os.getenv("SEMANTIC_VALIDATOR_MODEL")
+
 
 def verify_neo4j_connectivity(uri: str) -> bool:
     # noinspection PyBroadException

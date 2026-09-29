@@ -46,7 +46,7 @@ def assert_neo4j_node_exists(label: str, property_key: str, property_value: str)
 def assert_semantic_criteria(criteria: List[str]):
     """Leverages a small local LLM natively awaiting Ollama responses."""
 
-    async def validator(response_text: str, db_client: Neo4jClient):
+    async def validator(response_text: str, db_client: Neo4jClient, model_name: str = None):
         system_prompt = (
             "You are a strict QA Automated Test Engine. Your assignment is to evaluate a raw language response "
             "against an engineering criteria checklist. Analyze the assertions meticulously.\n\n"
@@ -64,16 +64,22 @@ def assert_semantic_criteria(criteria: List[str]):
 
         # Intercepts host from OLLAMA_HOST environment layer automatically
         client = AsyncClient()
-        response = await client.generate(
-            model=OLLAMA_MODEL_NAME,
-            system=system_prompt,
-            prompt=user_prompt,
+        active_model = model_name or OLLAMA_MODEL_NAME
+
+        response = await client.chat(
+            active_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            format="json",  # Enforce native JSON mode
             keep_alive=-1,
             options={
                 "temperature": 0.0,
+                "num_predict": 1024,  # Evaluator response is short; prevents runaway generations
             }
         )
-        raw_output = response["response"].strip()
+        raw_output = response["message"]["content"].strip()
 
         try:
             clean_json = re.sub(r"^```json|```$", "", raw_output, flags=re.IGNORECASE).strip()
