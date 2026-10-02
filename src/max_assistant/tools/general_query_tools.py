@@ -147,7 +147,7 @@ class GeneralQueryTools(BaseToolProvider):
         ])
 
         self.bound_llm = llm.bind(
-            model="gemma4:E4B",
+            # a model just for query generation could be specified here
             options={
                 "temperature": 0.0,
                 "num_predict": 2048,
