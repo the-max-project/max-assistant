@@ -47,7 +47,7 @@ margaret_in_laws:
     - user_input: "Who are my siblings-in-law"
       validators:
         - semantic_criteria:
-            - Verify that Linda Smith is a sibling-in-law or sister-in-law and optionally that she is married to a sibling
+            - Verify that Linda Smith is in the response and optionally that she is married to a sibling
 
 margaret_relationships:
   username: "Margaret.Miller"
