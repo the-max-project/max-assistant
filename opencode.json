@@ -1,0 +1,6 @@
+{
+  "env": {
+    "PATH": "./.venv/bin:$PATH",
+    "VIRTUAL_ENV": "./.venv"
+  }
+}
