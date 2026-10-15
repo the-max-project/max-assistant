@@ -93,11 +93,13 @@ class AppServices:
     ) -> Tuple[Neo4jClient, ChatOllama, asyncio.Task]:
         """Initializes the Neo4j client and the Ollama LLM concurrently."""
         logger.info("Initializing Neo4j client and LLM...")
-
+        
+        # Use existing environment variable or fallback to default in config 
         active_model = model_name or OLLAMA_MODEL_NAME
-
+        
+        # Pass temperature through directly, let create_llm_instance handle all other options
         llm = create_llm_instance(active_model, OLLAMA_BASE_URL, temperature=0)
-
+        
         try:
             # Now 'cls' is perfectly bound and safe to call
             db_client, preload_task = await asyncio.gather(
@@ -107,7 +109,7 @@ class AppServices:
         except Exception as e:
             logger.critical(f"Concurrent bootstrapping failed: {e}", exc_info=True)
             raise
-
+            
         return db_client, llm, preload_task
 
     @staticmethod
