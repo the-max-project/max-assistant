@@ -53,7 +53,8 @@ async def test_answer_general_question_happy_path():
 
     parsed = json.loads(result)
     assert parsed == {"data": [{"name": "A"}]}
-    db_client.get_schema.assert_awaited_once()
+    #TODO: the schema is no longer being used, awaiting further refactoring of the general query tool
+    #db_client.get_schema.assert_awaited_once()
     db_client.execute_query.assert_awaited_once()
 
 

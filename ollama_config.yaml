@@ -1,0 +1,33 @@
+# Ollama configuration for Max-Assistant
+# This file allows you to specify different parameters for various models
+
+default_model: "gemma4:26B"
+default:
+  temperature: 0.0
+  timeout: 120.0
+  keep_alive: "-1"
+  thinking_level: "balanced"
+  # Additional ChatOllama options can be passed here through the 'options' dict
+  options:
+    num_ctx: 16384
+
+models:
+  llama3:
+    temperature: 0.7
+    timeout: 180.0
+    thinking_level: "detailed"
+    options:
+      num_ctx: 16384
+      numa: true
+  gemma4:26B:
+    temperature: 0.3
+    options:
+      num_ctx: 16384
+      top_k: 50
+  ollama-gemma2:
+    temperature: 0.1
+    timeout: 300.0
+    thinking_level: "detailed"
+    options:
+      num_ctx: 8192
+      mirostat: 1
