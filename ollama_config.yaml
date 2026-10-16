@@ -12,6 +12,12 @@ default:
     num_ctx: 16384
 
 models:
+  gemma4:12B:
+    temperature: 0.3
+    timeout: 180.0
+    thinking: False
+    options:
+      num_ctx: 16384
   llama3:
     temperature: 0.7
     timeout: 180.0
