@@ -50,7 +50,7 @@ class RelationshipCategory(str, Enum):
 class PersonTools(BaseToolProvider):
     """
     Encapsulates person-related tools including profile retrieval, contact searches,
-    relationship role resolutions, and graph network queries relative to the :User node.
+    relationship role resolutions, and graph network queries.
     """
 
     MIN_DEPTH = 1
@@ -171,100 +171,121 @@ class PersonTools(BaseToolProvider):
     # Traversal Builder for query_relationship
     # -------------------------------------------------------------------------
 
-    def _build_match_clause(self, category: RelationshipCategory, depth: int) -> str:
-        """Constructs targeted Cypher traversals per relationship type."""
+    @staticmethod
+    def _build_root_match(has_name: bool) -> str:
+        """Returns the origin anchor MATCH clause depending on whether a name was supplied."""
+        if has_name:
+            # Matches target individual by both first and last name (case-insensitive)
+            return """
+                MATCH (origin:Person)
+                WHERE toLower(origin.firstName) = toLower($first_name)
+                  AND toLower(origin.lastName) = toLower($last_name)
+            """
+        # Defaults to the active authenticated user
+        return """
+            MATCH (origin:User {id: $user_id})
+        """
+
+    @staticmethod
+    def _build_match_clause(category: RelationshipCategory, depth: int) -> str:
+        """Constructs targeted Cypher traversals per relationship type starting from origin."""
         match category:
             case RelationshipCategory.DESCENDANT:
                 return f"""
-                    MATCH (u:User {{id: $user_id}})-[:PARENT_OF*{depth}]->(target:Person)
+                    MATCH (origin)-[:PARENT_OF*{depth}]->(target:Person)
                 """
 
             case RelationshipCategory.ANCESTOR:
                 return f"""
-                    MATCH (u:User {{id: $user_id}})<-[:PARENT_OF*{depth}]-(target:Person)
+                    MATCH (origin)<-[:PARENT_OF*{depth}]-(target:Person)
                 """
 
             case RelationshipCategory.SIBLINGS:
                 return """
-                    MATCH (u:User {id: $user_id})<-[:PARENT_OF]-(parent:Person)-[:PARENT_OF]->(target:Person)
-                    WHERE target.id <> u.id
+                    MATCH (origin)<-[:PARENT_OF]-(parent:Person)-[:PARENT_OF]->(target:Person)
+                    WHERE target.id <> origin.id
                 """
 
             case RelationshipCategory.AUNT_UNCLE:
                 if depth == 1:
                     return """
-                        MATCH (u:User {id: $user_id})<-[:PARENT_OF]-(parent:Person)
+                        MATCH (origin)<-[:PARENT_OF]-(parent:Person)
                         MATCH (parent)<-[:PARENT_OF]-(grandparent:Person)-[:PARENT_OF]->(target:Person)
                         WHERE target.id <> parent.id
-                          AND NOT (u)<-[:PARENT_OF]-(target)
+                          AND NOT (origin)<-[:PARENT_OF]-(target)
                     """
                 ancestor_hops = depth - 1
                 return f"""
-                    MATCH (u:User {{id: $user_id}})<-[:PARENT_OF*{ancestor_hops}]-(lineal:Person)
+                    MATCH (origin)<-[:PARENT_OF*{ancestor_hops}]-(lineal:Person)
                     MATCH (lineal)<-[:PARENT_OF]-(g_parent:Person)-[:PARENT_OF]->(target:Person)
                     WHERE target.id <> lineal.id
-                      AND NOT (u)<-[:PARENT_OF *1..{depth}]-(target)
+                      AND NOT (origin)<-[:PARENT_OF *1..{depth}]-(target)
                 """
 
             case RelationshipCategory.SPOUSE:
                 return """
-                    MATCH (u:User {id: $user_id})-[:MARRIED_TO]-(target:Person)
-                    WHERE target.id <> u.id
+                    MATCH (origin)-[:MARRIED_TO]-(target:Person)
+                    WHERE target.id <> origin.id
                 """
 
             case RelationshipCategory.CHILD_IN_LAW:
                 return f"""
-                    MATCH (u:User {{id: $user_id}})-[:PARENT_OF*{depth}]->(descendant:Person)-[:MARRIED_TO]-(target:Person)
-                    WHERE target.id <> u.id
+                    MATCH (origin)-[:PARENT_OF*{depth}]->(descendant:Person)-[:MARRIED_TO]-(target:Person)
+                    WHERE target.id <> origin.id
                 """
 
             case RelationshipCategory.IN_LAW:
                 return f"""
-                    MATCH (u:User {{id: $user_id}})-[:MARRIED_TO]-(spouse:Person)
+                    MATCH (origin)-[:MARRIED_TO]-(spouse:Person)
                     MATCH (spouse)<-[:PARENT_OF*{depth}]-(target:Person)
-                    WHERE target.id <> u.id AND target.id <> spouse.id
+                    WHERE target.id <> origin.id AND target.id <> spouse.id
                 """
 
             case RelationshipCategory.SIBLING_IN_LAW:
                 return """
-                    MATCH (u:User {id: $user_id})
                     CALL {
-                        // Path A: Spouses of user's siblings
-                        WITH u
-                        MATCH (u)<-[:PARENT_OF]-(:Person)-[:PARENT_OF]->(sibling:Person)-[:MARRIED_TO]-(target:Person)
-                        WHERE sibling.id <> u.id AND target.id <> u.id
+                        // Path A: Spouses of origin's siblings
+                        WITH origin
+                        MATCH (origin)<-[:PARENT_OF]-(:Person)-[:PARENT_OF]->(sibling:Person)-[:MARRIED_TO]-(target:Person)
+                        WHERE sibling.id <> origin.id AND target.id <> origin.id
                         RETURN target
                         UNION
-                        // Path B: Siblings of user's spouse
-                        WITH u
-                        MATCH (u)-[:MARRIED_TO]-(spouse:Person)<-[:PARENT_OF]-(:Person)-[:PARENT_OF]->(target:Person)
-                        WHERE spouse.id <> u.id AND target.id <> spouse.id AND target.id <> u.id
+                        // Path B: Siblings of origin's spouse
+                        WITH origin
+                        MATCH (origin)-[:MARRIED_TO]-(spouse:Person)<-[:PARENT_OF]-(:Person)-[:PARENT_OF]->(target:Person)
+                        WHERE spouse.id <> origin.id AND target.id <> spouse.id AND target.id <> origin.id
                         RETURN target
                     }
                 """
 
             case RelationshipCategory.FRIEND:
                 return """
-                    MATCH (u:User {id: $user_id})-[:FRIEND_OF]-(target:Person)
-                    WHERE target.id <> u.id
+                    MATCH (origin)-[:FRIEND_OF]-(target:Person)
+                    WHERE target.id <> origin.id
                 """
 
             case RelationshipCategory.SUPPORT_WORKER:
                 return """
-                    MATCH (u:User {id: $user_id})-[:SUPPORTED_BY]->(target:Person)
+                    MATCH (origin)-[:SUPPORTED_BY]->(target:Person)
                 """
 
             case RelationshipCategory.COHABITANT:
                 return """
-                    MATCH (u:User {id: $user_id})-[:LIVES_WITH]-(target:Person)
-                    WHERE target.id <> u.id
+                    MATCH (origin)-[:LIVES_WITH]-(target:Person)
+                    WHERE target.id <> origin.id
                 """
 
-    def _compose_cypher(self, category: RelationshipCategory, depth: int, include_spouses: bool) -> str:
-        """Assembles match patterns and projection stages."""
+    def _compose_cypher(
+        self,
+        category: RelationshipCategory,
+        depth: int,
+        include_spouses: bool,
+        has_name: bool,
+    ) -> str:
+        """Assembles root matching, path traversal patterns, and projection stages."""
+        root_clause = self._build_root_match(has_name).strip()
         traversal = self._build_match_clause(category, depth).strip()
 
-        # Non-genealogical queries or direct marriage queries do not expand spouses
         skip_spouse_expansion = (
             not include_spouses
             or category in (
@@ -279,15 +300,17 @@ class PersonTools(BaseToolProvider):
 
         if skip_spouse_expansion:
             return f"""
+                {root_clause}
                 {traversal}
                 RETURN DISTINCT properties(target) AS person
             """
 
-        # Return both the relative and their spouse (excluding current user)
+        # Return both the relative and their spouse (excluding the origin individual)
         return f"""
+            {root_clause}
             {traversal}
             OPTIONAL MATCH (target)-[:MARRIED_TO]-(spouse:Person)
-            WHERE spouse.id <> $user_id
+            WHERE spouse.id <> origin.id
             WITH target, spouse
             UNWIND [target] + (CASE WHEN spouse IS NOT NULL THEN [spouse] ELSE [] END) AS member
             RETURN DISTINCT properties(member) AS person
@@ -302,11 +325,15 @@ class PersonTools(BaseToolProvider):
         self,
         user_info: Annotated[dict, InjectedState("userinfo")],
         relationship: str,
+        first_name: str | None = None,
+        last_name: str | None = None,
         depth: int = 1,
         include_spouses: bool = False,
     ) -> str:
-        """Queries the graph database for people connected to the user by relationship type, including
-        family connections, ancestors, descendants, friends and support staff/professionals.
+        """Queries the graph database for people connected to a person (or the logged-in user) by relationship type.
+
+        If first_name and last_name are provided, finds relations relative to that specific person.
+        If neither name is provided, automatically finds relations relative to the current logged-in user.
 
         Args:
             relationship: The category of connection. Must be one of:
@@ -321,6 +348,8 @@ class PersonTools(BaseToolProvider):
                 - 'friend': Personal friends (FRIEND_OF)
                 - 'support_worker': Caregivers, support workers, medical aides (SUPPORTED_BY)
                 - 'cohabitant': Roommates or individuals sharing the residence (LIVES_WITH)
+            first_name: Optional first name of the person whose relationships are being queried (e.g. 'Arthur').
+            last_name: Optional last name of the person whose relationships are being queried (e.g. 'Dent').
             depth: Generational distance modifier (1-5, default is 1).
                    Applies to: 'descendant', 'ancestor', 'aunt_uncle', 'child_in_law', and 'in_law'.
                    Rule: Standard (parent, child, aunt, child-in-law) = 1.
@@ -329,15 +358,20 @@ class PersonTools(BaseToolProvider):
                    Ignored for 'siblings', 'sibling_in_law', 'spouse', 'friend', 'support_worker', and 'cohabitant'.
             include_spouses: If True, returns both the relatives and their spouses (default False).
         """
-        logger.info("Tool: query_relationship (category=%s, depth=%s, include_spouses=%s)", relationship, depth, include_spouses)
+        logger.info(
+            "Tool: query_relationship (category=%s, first_name=%s, last_name=%s, depth=%s, include_spouses=%s)",
+            relationship, first_name, last_name, depth, include_spouses
+        )
         user_id = self._get_verified_user_id(user_info)
 
+        # 1. Validate depth boundaries
         if not (isinstance(depth, int) and self.MIN_DEPTH <= depth <= self.MAX_DEPTH):
             return json.dumps({
                 "error": "Invalid_Depth",
                 "details": f"Depth parameter must be an integer between {self.MIN_DEPTH} and {self.MAX_DEPTH}."
             })
 
+        # 2. Validate category
         try:
             category = RelationshipCategory(relationship.strip().lower())
         except ValueError:
@@ -347,8 +381,28 @@ class PersonTools(BaseToolProvider):
                 "details": f"Relationship '{relationship}' is not recognized. Valid options: {valid_types}."
             })
 
-        query = self._compose_cypher(category, depth, include_spouses)
-        params = {"user_id": user_id}
+        # 3. Determine origin node anchor (named person vs. active user)
+        fn_clean = first_name.strip() if first_name else None
+        ln_clean = last_name.strip() if last_name else None
+
+        # If only one name component was provided, reject early with a helpful prompt
+        if (fn_clean and not ln_clean) or (ln_clean and not fn_clean):
+            return json.dumps({
+                "error": "Incomplete_Name",
+                "details": "Both first_name and last_name must be provided to query relationships for a specific person. Alternatively, omit both to query for the current user."
+            })
+
+        has_name = bool(fn_clean and ln_clean)
+
+        params: Dict[str, Any] = {}
+        if has_name:
+            params["first_name"] = fn_clean
+            params["last_name"] = ln_clean
+        else:
+            params["user_id"] = user_id
+
+        # 4. Compose and execute Cypher
+        query = self._compose_cypher(category, depth, include_spouses, has_name=has_name)
 
         return await self._query_and_validate_nodes(
             query=query,

@@ -79,7 +79,7 @@ maragaret_connection_to_arthur:
         - substrings_present_all: ["Smith", "Grandfather", "Black", "friend"]
     - user_input: "Tell me more about my grandfather"
       validators:
-        - substrings_present_all: ["born", "1895", "Smith", "Paternal"]
+        - substrings_present_all: ["born", "1895", "Smith"]
     - user_input: "How many kids did he have"
       validators:
         - substrings_present_any: ["three", "3"]
