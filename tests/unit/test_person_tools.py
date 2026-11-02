@@ -90,7 +90,8 @@ def test_get_tools_exposes_expected_names():
     expected_tools = {
         "find_person_by_name",
         "find_person_by_title",
-        "get_relationship_to_user"
+        "get_relationship_to_user",
+        "query_relationship",
     }
 
     assert tool_names == expected_tools
