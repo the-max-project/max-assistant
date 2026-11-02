@@ -1,4 +1,5 @@
 # tests/conftest.py
+import asyncio
 import os
 import json
 import socket
@@ -9,6 +10,9 @@ from datetime import datetime
 
 import yaml
 from dotenv import load_dotenv
+
+
+
 
 # Find the workspace root based on this file's position
 TESTS_DIR = Path(__file__).parent.resolve()
@@ -120,6 +124,49 @@ def ensure_required_services_are_alive():
         )
 
     print("[PRE-FLIGHT] Environment checks healthy. Launching framework test grid.\n")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_ollama_models_at_session_end():
+    """
+    Session teardown fixture that guarantees all resident LLMs
+    (the last tested runner model and the semantic validator model)
+    are evicted from VRAM upon test completion.
+    """
+    # 1. Setup: Runs before the test session begins
+    yield
+
+    # 2. Teardown: Runs after all test suites and scenarios complete
+
+    from tests.function.test_runner import unload_ollama_model, get_active_model
+
+    print("\n" + "=" * 80)
+    print(" [TEARDOWN] Evicting active test runner & validator models from VRAM...")
+    print("=" * 80)
+
+    async def _evict_all():
+        # Models to evict
+        models_to_evict = set()
+
+        # (a) The last active model tracked by test_runner.py
+        last_active = get_active_model()
+        if last_active:
+            models_to_evict.add(last_active)
+
+        # (b) The semantic validator model if configured/used
+        validator_model = SEMANTIC_VALIDATOR_MODEL or OLLAMA_MODEL_NAME
+        if validator_model:
+            models_to_evict.add(validator_model)
+
+        # Evict each model
+        for model in models_to_evict:
+            await unload_ollama_model(model, base_url=OLLAMA_BASE_URL)
+
+    try:
+        # Run asynchronous unload call within teardown
+        asyncio.run(_evict_all())
+    except Exception as exc:
+        print(f"[TEARDOWN WARN] Error unloading models: {exc}")
 
 
 def pytest_generate_tests(metafunc):
