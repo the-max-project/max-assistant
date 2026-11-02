@@ -29,7 +29,7 @@ margaret_support_staff:
     - user_input: "What are the names of the nurses at my residence"
       validators:
         - substrings_present_all: ["David Lee","Patricia Finch"]
-    - user_input: "how about psw"
+    - user_input: "how about personal support workers"
       validators:
         - substrings_present_all: ["Tom Wilson", "Maria Gonzalez"]
     - user_input: "Who is Kenji"

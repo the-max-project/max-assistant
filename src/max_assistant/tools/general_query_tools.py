@@ -186,10 +186,9 @@ class GeneralQueryTools(BaseToolProvider):
             user_info: Annotated[dict, InjectedState("userinfo")]
     ) -> str:
         """
-        Try to use this tool to answer ANY question about
-        family members, support staff, relationships, locations, addresses, or personal history if no
-        other specific tool applies. Use this for questions like "Does X have children?",
-        "Where does Y live?", or "Who are my great-grandchildren?"
+        This database query tool should only be used if no other tool applies.
+        It can be used to answer questions that relate to the following nodes:
+        family members, support staff, relationships, locations, addresses, or personal history.
         """
         logger.info(f"Tool: answer_general_question for: {question}")
 

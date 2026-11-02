@@ -4,7 +4,7 @@ id,firstName,lastName,title,startDate,endDate,phone,email,notes
 83,Kenji,Tanaka,Surgeon,2020-01-01,,519-555-6003,k.tanaka@ggh.on.ca,Orthopedic surgeon. Performed hip replacement in 2019.
 84,Patricia,Finch,Nurse,2024-01-01,,519-555-1200,p.finch@sunsetmeadows.com,Nurse at Sunset Meadows.
 85,David,Lee,Nurse,2024-01-01,,519-555-1200,d.lee@sunsetmeadows.com,Nurse at Sunset Meadows.
-86,Maria,Gonzalez,PSW,2024-01-01,,519-555-1200,m.gonzalez@sunsetmeadows.com,PSW at Sunset Meadows.
-87,Tom,Wilson,PSW,2024-01-01,,519-555-1200,t.wilson@sunsetmeadows.com,PSW at Sunset Meadows.
+86,Maria,Gonzalez,Personal Support Worker,2024-01-01,,519-555-1200,m.gonzalez@sunsetmeadows.com,PSW at Sunset Meadows.
+87,Tom,Wilson,Personal Support Worker,2024-01-01,,519-555-1200,t.wilson@sunsetmeadows.com,PSW at Sunset Meadows.
 88,Sarah,Jenkins,Case Manager,2024-01-01,,519-555-1200,s.jenkins@sunsetmeadows.com,Case Manager at Sunset Meadows.
 89,Brian,Adams,Receptionist,2024-01-01,,519-555-1200,reception@sunsetmeadows.com,Receptionist at Sunset Meadows.

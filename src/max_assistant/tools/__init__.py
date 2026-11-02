@@ -10,7 +10,7 @@ ALL_TOOL_PROVIDERS = [
     PersonTools,
     ScheduleTools,
     GmailTools,
-    # GeneralQueryTools,
+    GeneralQueryTools,
     ReminderTools,
 ]
 
@@ -19,6 +19,6 @@ __all__ = [
     "PersonTools",
     "ScheduleTools",
     "GmailTools",
-    # "GeneralQueryTools",
+    "GeneralQueryTools",
     "ReminderTools",
 ]

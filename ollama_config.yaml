@@ -10,7 +10,7 @@ default:
   thinking: True
   # Additional ChatOllama options can be passed here through the 'options' dict
   options:
-    num_ctx: 16384
+    num_ctx: 32768
 
 models:
   llama3:
@@ -18,12 +18,12 @@ models:
     timeout: 180.0
     thinking_level: "detailed"
     options:
-      num_ctx: 16384
+      num_ctx: 32768
       numa: true
   gemma4:26B:
     temperature: 0.3
     options:
-      num_ctx: 16384
+      num_ctx: 32768
       top_k: 50
   ollama-gemma2:
     temperature: 0.1
