@@ -7,9 +7,10 @@ default:
   timeout: 120.0
   keep_alive: "-1"
   thinking_level: "balanced"
+  thinking: True
   # Additional ChatOllama options can be passed here through the 'options' dict
   options:
-    num_ctx: 16384
+    num_ctx: 32768
 
 models:
   gemma4:12B:
@@ -23,12 +24,12 @@ models:
     timeout: 180.0
     thinking_level: "detailed"
     options:
-      num_ctx: 16384
+      num_ctx: 32768
       numa: true
   gemma4:26B:
     temperature: 0.3
     options:
-      num_ctx: 16384
+      num_ctx: 32768
       top_k: 50
   ollama-gemma2:
     temperature: 0.1

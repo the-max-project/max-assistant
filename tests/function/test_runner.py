@@ -172,4 +172,9 @@ async def execute_scenario_workflow(
             print("=" * 80 + "\n")
 
 
+def get_active_model() -> Optional[str]:
+    """Returns the name of the model currently loaded in the runner."""
+    global _ACTIVE_MODEL
+    return _ACTIVE_MODEL
+
 
