@@ -418,9 +418,9 @@ class PersonTools(BaseToolProvider):
         first_name: str | None = None,
         last_name: str | None = None,
     ) -> str:
-        """Finds a person, family member, friend, or support contact by first name, last name, or both.
-        Returns potential matches with all attributes (phone, email, notes, address) and a relationship
-        description field. At least one name must be provided. Case-insensitive.
+        """Finds a person, family member, friend, or support contact by just first name, last name, or both.
+        Returns potential matches with all attributes (phone, email, notes, address) and the relationship
+        to the user. At least one name must be provided. Case-insensitive.
         """
         logger.info("Tool: find_person_by_name: fn=%s, ln=%s", first_name, last_name)
         user_id = self._get_verified_user_id(user_info)
