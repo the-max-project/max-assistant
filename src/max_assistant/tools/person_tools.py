@@ -330,31 +330,34 @@ class PersonTools(BaseToolProvider):
         depth: int = 1,
         include_spouses: bool = False,
     ) -> str:
-        """Queries the graph database for people connected to a person (or the logged-in user) by relationship type.
+        """Queries the graph database for all people connected to a person (or the logged-in user) by a relationship type.
 
         If first_name and last_name are provided, finds relations relative to that specific person.
-        If neither name is provided, automatically finds relations relative to the current logged-in user.
+        If neither name is provided, it automatically finds relations relative to the current logged-in user.
 
         Args:
             relationship: The category of connection. Must be one of:
-                - 'descendant': Children, grandchildren, great-grandchildren
-                - 'ancestor': Parents, grandparents, great-grandparents
-                - 'siblings': Brothers and sisters
-                - 'sibling_in_law': Brothers-in-law, sisters-in-law (spouse's siblings or siblings' spouses)
-                - 'child_in_law': Sons-in-law, daughters-in-law (spouse of child/grandchild)
-                - 'in_law': Parents-in-law (parents/grandparents of spouse)
-                - 'aunt_uncle': Aunts, uncles, grandaunts, granduncles
-                - 'spouse': Current husband, wife, or partner
-                - 'friend': Personal friends (FRIEND_OF)
-                - 'support_worker': Caregivers, support workers, medical aides (SUPPORTED_BY)
-                - 'cohabitant': Roommates or individuals sharing the residence (LIVES_WITH)
+                - 'Descendant': Children, grandchildren, great-grandchildren
+                - 'Ancestor': Parents, grandparents, great-grandparents
+                - 'Siblings': Brothers and sisters
+                - 'Sibling_in_law': Brothers-in-law, sisters-in-law (spouse's siblings or siblings' spouses)
+                - 'Child_in_law': Sons-in-law, daughters-in-law (spouse of child/grandchild)
+                - 'In_law': Parents-in-law (parents/grandparents of spouse)
+                - 'Aunt_uncle': Aunts, uncles, grandaunts, granduncles
+                - 'Spouse': Current husband, wife, or partner
+                - 'Friend': Personal friends (FRIEND_OF)
+                - 'Support_worker': Caregivers, support workers, medical aides (SUPPORTED_BY)
+                - 'Cohabitant': Roommates or individuals sharing the residence (LIVES_WITH)
             first_name: Optional first name of the person whose relationships are being queried (e.g. 'Arthur').
             last_name: Optional last name of the person whose relationships are being queried (e.g. 'Dent').
             depth: Generational distance modifier (1-5, default is 1).
                    Applies to: 'descendant', 'ancestor', 'aunt_uncle', 'child_in_law', and 'in_law'.
-                   Rule: Standard (parent, child, aunt, child-in-law) = 1.
-                         'grand' variations (grandparent, grandchild, grandaunt) = 2.
-                         Add +1 for each additional 'great-' prefix encountered.
+                   Explicit depth values:
+                     - Children / Parents / In-Laws = 1
+                     - Grandchildren / Grandparents = 2
+                     - Great-grandchildren / Great-grandparents = 3
+                     - Great-great-grandchildren / Great-great-grandparents = 4
+                     - Great-great-great-grandchildren / Great-great-great-grandparents = 5
                    Ignored for 'siblings', 'sibling_in_law', 'spouse', 'friend', 'support_worker', and 'cohabitant'.
             include_spouses: If True, returns both the relatives and their spouses (default False).
         """
@@ -385,11 +388,13 @@ class PersonTools(BaseToolProvider):
         fn_clean = first_name.strip() if first_name else None
         ln_clean = last_name.strip() if last_name else None
 
-        # If only one name component was provided, reject early with a helpful prompt
+        # If only one part of name was provided, reject early with a helpful prompt
         if (fn_clean and not ln_clean) or (ln_clean and not fn_clean):
             return json.dumps({
                 "error": "Incomplete_Name",
-                "details": "Both first_name and last_name must be provided to query relationships for a specific person. Alternatively, omit both to query for the current user."
+                "details": "Both first_name and last_name must be provided to query relationships for a specific person."
+                "You can find_person_by_name to determine the person's full name then call this tool."
+                "Omit both first and last names to query for the current user."
             })
 
         has_name = bool(fn_clean and ln_clean)
@@ -521,7 +526,7 @@ class PersonTools(BaseToolProvider):
         find_query = """
             MATCH (u:User {id: $user_id})-[*1..3]-(p:Person)
             WHERE toLower(p.firstName) = $first_name AND toLower(p.lastName) = $last_name
-            RETURN p.id AS person_id
+            RETURN p.id AS person_id, properties(p) AS person
             LIMIT 1
         """
         params = {
@@ -535,9 +540,14 @@ class PersonTools(BaseToolProvider):
             if not find_result.get("data"):
                 return json.dumps({"error": "Person not found", "details": "No person found with that name."})
 
-            person_id = find_result["data"][0].get("person_id")
-            if not person_id:
+            record = find_result["data"][0]
+            person_id = record.get("person_id")
+            person_props = record.get("person")
+
+            if not person_id or not person_props:
                 return json.dumps({"error": "Data parsing failed", "details": "Person found, but has no 'id' property."})
+
+            validated_person = PersonDetails.model_validate(person_props)
 
             path_data = await self._find_relationship_path(person_id, user_id)
             description = (
@@ -546,9 +556,10 @@ class PersonTools(BaseToolProvider):
             )
 
             return json.dumps({
+                "person": validated_person.model_dump(mode="json"),
                 "relationship": description,
                 "path_length": len(path_data.get("rel_details", [])) if path_data else 0,
-            }, indent=2)
+            }, indent=2, default=str)
 
         except Neo4jCircuitBreakerError as e:
             logger.warning("Circuit Breaker blocked get_relationship_to_user: %s", e)
@@ -560,6 +571,9 @@ class PersonTools(BaseToolProvider):
         except Neo4jClientError as e:
             logger.error("Database error in get_relationship_to_user: %s", e)
             return json.dumps({"error": "Database_Unavailable", "message": str(e)})
+        except ValidationError as e:
+            logger.error("Validation error for PersonDetails: %s", e.errors())
+            return json.dumps({"error": "Data validation failed", "details": e.errors()}, default=str)
         except Exception as e:
             logger.error("Unexpected error in get_relationship_to_user: %s", e)
             return json.dumps({"error": "Internal_Error", "details": str(e)})

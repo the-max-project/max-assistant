@@ -61,8 +61,7 @@ def create_llm_instance(
     config = load_ollama_config()
     
     # Get the final model name (from env var or config)
-    env_model_name = model_name  # This was passed in 
-    final_model_name = get_model_name_from_config(config, env_model_name)
+    final_model_name = get_model_name_from_config(config, model_name)
     
     logger.info("=" * 50)
     logger.info("🚀 Initializing Ollama instance...")
@@ -77,34 +76,38 @@ def create_llm_instance(
     if config_options:
         params.update(config_options)
         
-    # Extract temperature which is a top level parameter   
+    # Extract top-level parameters that need special handling
     temp = params.pop('temperature', temperature)
+    reasoning = params.pop('reasoning', True)
+    num_predict = params.pop('num_predict', 4096)  # Allow override from config
+    format_param = params.pop('format', None)  # Allow override from config
     
     # Process options - these should be passed directly to ChatOllama constructor
     options = params.get('options', {})
     
-    # Log the effective configuration for debugging
-    logger.info(f"   Effective parameters:")
-    logger.info(f"     Model: {final_model_name}")
-    logger.info(f"     Base URL: {base_url}")  
-    logger.info(f"     Temperature: {temp}")
-    if options:
-        logger.info(f"     Options:")
-        for key, value in options.items():
-            logger.info(f"       {key}: {value}")
-    else:
-        logger.info(f"     Options: None")
-    
-    # Build the ChatOllama parameters - just use the base_url that was passed in
+    # Build the ChatOllama parameters
     chat_params = {
         'model': final_model_name,
         'temperature': temp,
         'base_url': base_url,  # Always use the passed base_url from environment
+        'reasoning': reasoning,
+        'num_predict': num_predict,
         'client_kwargs': {"timeout": timeout},
+        **options  # Spread options directly into chat_params
     }
     
-    # Add all other parameters from options
-    chat_params.update(options)
+    # Add format parameter if specified
+    if format_param:
+        chat_params['format'] = format_param
+    
+    logger.info("   Creating ChatOllama with parameters:")
+    for key, value in chat_params.items():
+        if isinstance(value, dict):
+            logger.info(f"     {key}:")
+            for sub_key, sub_value in value.items():
+                logger.info(f"       {sub_key}: {sub_value}")
+        else:
+            logger.info(f"     {key}: {value}")
     
     llm = ChatOllama(**chat_params)
     return llm

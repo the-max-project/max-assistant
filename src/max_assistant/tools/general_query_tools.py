@@ -12,12 +12,10 @@ from typing import Annotated
 
 from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
 from langchain_core.tools import StructuredTool
 from langgraph.prebuilt import InjectedState
 
 from max_assistant.clients.neo4j_client import Neo4jClient, Neo4jCircuitBreakerError, Neo4jClientError
-from max_assistant.agent.prompts import CYPHER_GENERATION_PROMPT
 from max_assistant.tools.registry import BaseToolProvider
 from max_assistant.utils.decorators import requires_db
 
@@ -135,7 +133,7 @@ class GeneralQueryTools(BaseToolProvider):
         Core Node Rule: All people (User, Family, Friend, Support) share the `:Person` label.
         - For general people lookups, relationships, and name searches, always match `(p:Person)`.
         - Use secondary labels ONLY when specifically asked:
-          - Current User: MATCH (u:User {{id: $user_id}}) or (u:Person {{id: $user_id}})
+          - Current User: MATCH (u:User {{id: '$user_id'}}) or (u:Person {{id: '$user_id}})
           - Only friends: MATCH (p:Person:Friend)
           - Only family: MATCH (p:Person:Family)
           - Only support workers: MATCH (p:Person:Support)
@@ -180,17 +178,17 @@ class GeneralQueryTools(BaseToolProvider):
         return "RETURN 'Error: Could not parse Cypher query from LLM response'"
 
     @requires_db
-    async def answer_general_question(
+    async def general_db_query(
             self,
             question: str,
             user_info: Annotated[dict, InjectedState("userinfo")]
     ) -> str:
         """
-        This database query tool should only be used if no other tool applies.
-        It can be used to answer questions that relate to the following nodes:
-        family members, support staff, relationships, locations, addresses, or personal history.
+        Use this tool when answering questions that require filtering, sorting, or comparing
+        properties (e.g., comparing ages, date of birth dob, counts, or dates) across people,
+        appointments, or relationships.
         """
-        logger.info(f"Tool: answer_general_question for: {question}")
+        logger.info(f"Tool: general_db_query for: {question}")
 
         # Convert the injected state dict into the string format your prompt expects
         #user_info_json = json.dumps(user_info)
@@ -288,7 +286,7 @@ class GeneralQueryTools(BaseToolProvider):
             return json.dumps({"error": "Database_Unavailable", "details": str(e)})
 
         except Exception as e:
-            logger.error(f"Unexpected error in answer_general_question: {e}", exc_info=True)
+            logger.error(f"Unexpected error in general_db_query: {e}", exc_info=True)
             return json.dumps({"error": "Internal_Error", "details": str(e)})
 
     def get_tools(self) -> list:
@@ -298,9 +296,9 @@ class GeneralQueryTools(BaseToolProvider):
         return [
             StructuredTool.from_function(
                 func=None,
-                coroutine=self.answer_general_question,
-                name="answer_general_question",
-                description=self.answer_general_question.__doc__,
+                coroutine=self.general_db_query,
+                name="general_db_query",
+                description=self.general_db_query.__doc__,
                 handle_tool_error=self.format_system_tool_error,
             ),
         ]

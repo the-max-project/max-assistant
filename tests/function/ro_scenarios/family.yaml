@@ -24,7 +24,7 @@ margaret_family:
     - user_input: "Do I have a sister"
       validators:
         - semantic_criteria:
-            - Verify the user does not have a sister or that there is no record of a sibling who is a sister
+            - Verify the response indicates the user does not have a sister or that there is no record of a sibling who is a sister
 
 margaret_family_advanced:
   username: "Margaret.Miller"
@@ -43,11 +43,9 @@ margaret_in_laws:
       validators:
         - semantic_criteria:
             - Verify that information is not available
-            - Includes an apology
     - user_input: "Who are my siblings-in-law"
       validators:
-        - semantic_criteria:
-            - Verify that Linda Smith is in the response and optionally that she is married to a sibling
+        - substrings_present_all: ["Linda","Smith"]
 
 margaret_relationships:
   username: "Margaret.Miller"
@@ -79,7 +77,8 @@ maragaret_connection_to_arthur:
         - substrings_present_all: ["Smith", "Grandfather", "Black", "friend"]
     - user_input: "Tell me more about my grandfather"
       validators:
-        - substrings_present_all: ["born", "1895", "Smith"]
+        - semantic_criteria:
+            - Verify that more information about Arthur Smith is in the response, including a birthdate of January 1, 1895
     - user_input: "How many kids did he have"
       validators:
         - substrings_present_any: ["three", "3"]

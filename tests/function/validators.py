@@ -76,7 +76,8 @@ def assert_semantic_criteria(criteria: List[str]):
             keep_alive=-1,
             options={
                 "temperature": 0.0,
-                "num_predict": 1024,  # Evaluator response is short; prevents runaway generations
+                "think": False,
+                "num_predict": 20048,  # Evaluator response is short; prevents runaway generations
             }
         )
         raw_output = response["message"]["content"].strip()

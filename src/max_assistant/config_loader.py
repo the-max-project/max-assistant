@@ -11,15 +11,32 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-def load_ollama_config() -> Dict[str, Any]:
+# config_loader.py is in project_root/src/max_assistant/config_loader.py
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+CONFIG_PATH = PROJECT_ROOT / "ollama_config.yaml"
+
+def load_ollama_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     """
-    Load Ollama configuration from YAML file with fallbacks.
+    Load Ollama configuration from the YAML file with fallbacks.
     
     Returns:
         Dict containing configuration for ChatOllama initialization
     """
-    # Look for config file in the current working directory (where service runs)
-    config_path = Path("ollama_config.yaml")
+
+    if config_path is None:
+        # Check an environment variable override first (useful for custom test configs)
+        env_override = os.environ.get("OLLAMA_CONFIG_PATH")
+        if env_override:
+            config_path = Path(env_override)
+        else:
+            # Anchor to project root relative to this file
+            project_root = Path(__file__).resolve().parent.parent
+            config_path = project_root / "ollama_config.yaml"
+
+    if not config_path.exists():
+        logger.info(f"No config file found at {config_path}, using defaults")
+        return {}
     
     # If no config file exists, return empty dict to use defaults
     if not config_path.exists():
