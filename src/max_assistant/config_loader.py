@@ -31,7 +31,7 @@ def load_ollama_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
             config_path = Path(env_override)
         else:
             # Anchor to project root relative to this file
-            project_root = Path(__file__).resolve().parent.parent
+            project_root = Path(__file__).resolve().parent.parent.parent
             config_path = project_root / "ollama_config.yaml"
 
     if not config_path.exists():

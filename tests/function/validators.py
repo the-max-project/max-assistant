@@ -76,7 +76,6 @@ def assert_semantic_criteria(criteria: List[str]):
             keep_alive=-1,
             options={
                 "temperature": 0.0,
-                "think": False,
                 "num_predict": 20048,  # Evaluator response is short; prevents runaway generations
             }
         )

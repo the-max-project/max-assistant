@@ -434,6 +434,7 @@ class PersonTools(BaseToolProvider):
             MATCH (u:User {id: $user_id})-[*1..5]-(p:Person)
             WHERE ($first_name IS NULL OR toLower(p.firstName) CONTAINS $first_name)
               AND ($last_name IS NULL OR toLower(p.lastName) CONTAINS $last_name)
+            WITH DISTINCT p  
             RETURN properties(p) AS person, labels(p) AS labels
             LIMIT 10
         """
