@@ -37,6 +37,23 @@ from max_assistant.utils.datetime_utils import current_datetime
 logger = logging.getLogger(__name__)
 
 
+def process_and_summarize(raw_input_data):
+    try:
+        # Attempt to parse the string as JSON
+        data = json.loads(raw_input_data)
+
+        # If it succeeds, run your JSON summary logic
+        if isinstance(data, list):
+            return f"JSON List: {json.dumps(data[:2])} ... Total records: {len(data)}"
+        return f"JSON Object: {json.dumps(list(data.keys())[:3])} keys..."
+
+    except (json.JSONDecodeError, TypeError):
+        # Fallback handling if it is plain text, html, or malformed
+        # Truncate safely using the slice conditional we used earlier
+        clean_text = str(raw_input_data).strip()
+        truncated = clean_text[:47] + "..." if len(clean_text) > 50 else clean_text
+        return f"Non-JSON Data (Raw Text Summary): {truncated}"
+
 
 # Initialize a fast, local tokenizer
 tokenizer = tiktoken.get_encoding("cl100k_base")
@@ -110,7 +127,7 @@ async def create_reasoning_engine(
         Node to invoke the LLM with the current state. The user's input is already
         in the message history.
         """
-        logger.info("Calling model with current history.")
+        logger.debug("Calling model with current history.")
 
         current_messages = state.get("messages", [])
         trimmed_messages = trim_messages(
@@ -140,6 +157,20 @@ async def create_reasoning_engine(
             # Fall back to standard interactive conversational persona
             chain = senior_assistant_prompt | llm_with_tools
 
+        # Get the last message from trimmed_messages
+        last_message = trimmed_messages[-1] if trimmed_messages else None
+
+        # Check if it's a HumanMessage (user input)
+        logger.info("==================== Calling Model: ===================")
+        if isinstance(last_message, HumanMessage):
+            last_user_prompt = last_message.content
+            logger.info(f"▶▶▶ [Human] [{last_user_prompt}]")
+        elif isinstance(last_message, ToolMessage):
+            last_tool_message = last_message.content
+            logger.info(f"▶▶▶ [Tool] [{process_and_summarize(last_tool_message)}]")
+        else:
+            logger.info(f"Calling Model: with prompt [{trimmed_messages[-1]}] ")
+
         # The 'messages' in the state now contains the user's latest input.
         response = await chain.ainvoke({
             "user_info": state["userinfo"],
@@ -147,8 +178,10 @@ async def create_reasoning_engine(
             "messages": trimmed_messages,
         })
 
-        logger.info(f"Model produced: {repr(response.content)}")
-        logger.info(f"RAW TOOL CALLS: {response.tool_calls}")
+        if response.tool_calls:
+            logger.info(f"◀◀◀ [Tool Call] {response.tool_calls}")
+        else:
+            logger.info(f"◀◀◀ [AI]  {repr(response.content)}")
 
         if response.tool_calls:
             # It's a standard tool call, just return it

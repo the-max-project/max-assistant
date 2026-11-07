@@ -9,7 +9,6 @@ from langchain_ollama import ChatOllama
 from langchain_core.runnables import RunnableConfig
 from langchain_core.output_parsers import StrOutputParser
 
-from max_assistant.utils.log_utils import log_banner
 from max_assistant.config_loader import load_ollama_config, get_ollama_params, get_model_name_from_config
 
 logger = logging.getLogger(__name__)
@@ -22,7 +21,7 @@ def validate_model_capabilities(
 ) -> None:
     """
     Fails fast at startup if the configured model is missing or doesn't support
-    what the reasoning graph needs (e.g. tool calling), instead of letting the
+    what the reasoning graph needs (e.g., tool calling), instead of letting the
     container come up healthy and crash on the first user turn.
     """
     try:
@@ -141,12 +140,12 @@ async def preload_model_async(
                 )
 
                 end_time = time.monotonic()
-                duration = end_time - start_time
+                duration = float(end_time - start_time)
 
-                logger.info( log_banner(
-                    [f"✅ Async warm-up complete! Model '{llm.model}' is ready.",
-                     f"  Warm-up duration: {duration:.2f} seconds.           ",
-                    ]) )
+                logger.info( "********* ✅ Async warm-up complete! *************")
+                logger.info( f" Model '{llm.model}' is ready. Warm-up duration: {duration:.2f} seconds.")
+                logger.info( "**************************************************")
+
                 return  # Warm-up successful
 
             except httpx.ConnectError:
