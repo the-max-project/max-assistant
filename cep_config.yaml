@@ -1,0 +1,40 @@
+# Presence Complex Event Processing (CEP) Configuration
+# Defines sequences to infer room presence and transitions.
+
+rules:
+  # Care home resident leaving room: Internal door opens/closes, then hallway motion detected
+  - name: "resident_leave_room"
+    room: "main"
+    target_state: "vacated"
+    window_seconds: 20
+    sequence:
+      - room: "MAIN"
+        sensor: "pir"
+        name: "door motion"
+        state: "active"
+      - room: "main"
+        sensor: "door"
+        state: "closed"
+
+  # Care home resident entering room: Hallway motion, then main room door, then motion inside
+  - name: "resident_enter_room"
+    room: "main"
+    target_state: "occupied"
+    window_seconds: 30
+    sequence:
+      - room: "main"
+        sensor: "door"
+        state: "open"
+      - room: "main"
+        sensor: "pir"
+        name: "door motion"
+        state: "active"
+
+  - name: "room_motion_occupied"
+    room: "main"
+    target_state: "occupied"
+    window_seconds: 5
+    sequence:
+      - room: "main"
+        sensor: "pir"
+        state: "active"

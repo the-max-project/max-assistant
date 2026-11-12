@@ -52,6 +52,14 @@ class ToolRegistry:
         self._tools.extend(new_tools)
         logger.debug(f"Registered {len(new_tools)} tools from {provider_class.__name__}.")
 
+    def register_instance(self, provider_instance):
+        """Registers a pre-instantiated provider instance with custom injected dependencies."""
+        self._providers.append(provider_instance)
+
+        # Also register its tools
+        if hasattr(provider_instance, "get_tools"):
+            self._tools.extend(provider_instance.get_tools())
+
     def get_all_tools(self) -> List[BaseTool]:
         """
         Returns a flat list of all tools from all registered providers.

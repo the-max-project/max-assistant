@@ -38,7 +38,7 @@
             "level": "INFO"
         },
         "uvicorn": {
-            "level": "INFO",
+            "level": "ERROR",
             "propagate": false,
             "handlers": ["console", "rotating_file", "rotating_error_file"]
         },

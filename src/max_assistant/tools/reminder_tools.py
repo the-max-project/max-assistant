@@ -1,13 +1,13 @@
 # Copyright (c) 2026, Robert Begg
 # Licensed under the MIT License. See LICENSE for more details.
 """
-Defines LangGraph tools for scheduling reminders using task nodes and saving them to Neo4j.
+Defines LangGraph tools for scheduling context-aware reminders using task nodes and saving them to Neo4j.
+Supports either relative delays or specific target times alongside validity windows and wake flags.
 """
 from datetime import datetime, timedelta
 import json
-import asyncio
 import logging
-from typing import Annotated
+from typing import Annotated, Optional
 
 from langchain_core.tools import StructuredTool
 from langgraph.prebuilt import InjectedState
@@ -16,8 +16,8 @@ from max_assistant.tools.registry import BaseToolProvider
 from max_assistant.clients.neo4j_client import Neo4jClientError, Neo4jCircuitBreakerError
 from max_assistant.utils.decorators import requires_db
 
-
 logger = logging.getLogger(__name__)
+
 
 class ReminderTools(BaseToolProvider):
     """
@@ -25,36 +25,98 @@ class ReminderTools(BaseToolProvider):
     backed by a Neo4j client instance.
     """
 
-    def __init__(self, db_client, llm=None):
+    def __init__(self, db_client, time_scheduler, llm=None):
         super().__init__(db_client, llm)
-        logger.debug("ReminderTools initialized with a Neo4j client.")
+        self.time_scheduler = time_scheduler
+        logger.debug("ReminderTools initialized with a Neo4j client and PersistentTimeScheduler.")
+
+    @staticmethod
+    def _parse_target_time(target_str: str, now: datetime) -> Optional[datetime]:
+        """
+        Attempts to parse a target time string in various common formats (e.g., '13:30', '1:30 PM', ISO).
+        If the resolved time is in the past for today, it rolls over and becomes a time tomorrow.
+        """
+        clean_str = target_str.strip().upper()
+
+        # Try ISO / full datetime formats first
+        for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                return datetime.strptime(clean_str, fmt)
+            except ValueError:
+                pass
+
+        # Try time-only formats
+        for fmt in ("%I:%M %p", "%I:%M%p", "%I %p", "%H:%M:%S", "%H:%M"):
+            try:
+                parsed_time = datetime.strptime(clean_str, fmt).time()
+                candidate_dt = datetime.combine(now.date(), parsed_time)
+                # If target time has already passed today, schedule for tomorrow
+                if candidate_dt <= now:
+                    candidate_dt += timedelta(days=1)
+                return candidate_dt
+            except ValueError:
+                pass
+
+        return None
 
     @requires_db
     async def schedule_reminder(
             self,
             message: str,
-            delay_minutes: float,
-            user_info: Annotated[dict, InjectedState("userinfo")]
-        ) -> str:
+            validity_minutes: float,
+            can_wake_user: bool,
+            user_info: Annotated[dict, InjectedState("userinfo")],
+            delay_minutes: Optional[float] = None,
+            target_time_str: Optional[str] = None,
+    ) -> str:
         """
-        Use this tool to schedule a reminder message after a certain number of minutes.
+        Use this tool to schedule a reminder. Either 'delay_minutes' OR 'target_time_str' must be provided.
+
+        Args:
+            message: The reminder instruction or text to speak to the user.
+            validity_minutes: How many minutes after the due time the reminder remains valid before expiring.
+            can_wake_user: True if this reminder should sound when the user is asleep; False to wait until they wake up.
+            delay_minutes: Elapsed minutes from now (e.g., 10 for "in 10 minutes").
+            target_time_str: An absolute time string (e.g., "1:30 PM", "13:30", "14:00").
         """
-        logger.info(f"Tool: schedule_reminder - message='{message}', delay={delay_minutes}m")
+        logger.info(
+            f"Tool: schedule_reminder - message='{message}', delay={delay_minutes}, "
+            f"target_time='{target_time_str}', validity={validity_minutes}m, can_wake={can_wake_user}"
+        )
 
         user_id = self._get_verified_user_id(user_info)
+        now = datetime.now()
+
+        # Resolve due datetime from either elapsed minutes or absolute time string
+        if delay_minutes is not None:
+            due_datetime = now + timedelta(minutes=delay_minutes)
+        elif target_time_str:
+            due_datetime = self._parse_target_time(target_time_str, now)
+            if not due_datetime:
+                return json.dumps({
+                    "error": "Invalid_Time_Format",
+                    "instruction": f"Could not parse the time '{target_time_str}'. Please provide a valid time like '1:30 PM' or '14:00'."
+                })
+        else:
+            return json.dumps({
+                "error": "Missing_Time_Parameter",
+                "instruction": "Please provide either 'delay_minutes' or 'target_time_str' to schedule the reminder."
+            })
 
         try:
-            # Calculate the absolute execution time
-            due_datetime = datetime.now() + timedelta(minutes=delay_minutes)
+            expires_datetime = due_datetime + timedelta(minutes=validity_minutes)
             due_iso = due_datetime.isoformat()
+            expires_iso = expires_datetime.isoformat()
 
             query = """
                 MATCH (u:User {id: $user_id}) 
-                WITH u, datetime($due_time) AS d
+                WITH u, datetime($due_time) AS d, datetime($expires_at) AS exp
                 CREATE (t:Task {
                     id: randomUUID(),
                     text: $text,
                     due_time: d,
+                    expires_at: exp,
+                    can_wake_user: $can_wake_user,
                     type: 'REMINDER',
                     status: 'PENDING'
                 })
@@ -68,6 +130,8 @@ class ReminderTools(BaseToolProvider):
             params = {
                 "text": message,
                 "due_time": due_iso,
+                "expires_at": expires_iso,
+                "can_wake_user": can_wake_user,
                 "user_id": user_id,
             }
 
@@ -81,14 +145,26 @@ class ReminderTools(BaseToolProvider):
                     "instruction": "Could not attach the reminder because your user profile was not found in the database. Please inform the user."
                 })
 
-            # 4. Extract and use the task_id
             task_id = data[0].get("task_id")
 
+            # Register with the priority heap
+            await self.time_scheduler.schedule(
+                task_id=task_id,
+                user_id=user_id,
+                text=message,
+                due_epoch=due_datetime.timestamp(),
+                expires_epoch=expires_datetime.timestamp(),
+                can_wake_user=can_wake_user
+            )
+
+            readable_time = due_datetime.strftime("%I:%M %p").lstrip("0")
             return json.dumps({
                 "success": True,
                 "task_id": task_id,
-                "message": f"Successfully scheduled reminder: '{message}' for {delay_minutes} minutes from now.",
-                "due_time": due_iso
+                "message": f"Successfully scheduled reminder for {readable_time}: '{message}'",
+                "due_time": due_iso,
+                "expires_at": expires_iso,
+                "can_wake_user": can_wake_user
             }, indent=2)
 
         except Neo4jCircuitBreakerError as e:
@@ -112,9 +188,7 @@ class ReminderTools(BaseToolProvider):
             return json.dumps({"error": "Failed to schedule reminder", "details": str(e)})
 
     def get_tools(self) -> list:
-        """
-        Returns a list of all tool methods bound to this instance.
-        """
+        """Returns the unified reminder tool bound to this instance."""
         return [
             StructuredTool.from_function(
                 func=None,
@@ -124,70 +198,3 @@ class ReminderTools(BaseToolProvider):
                 handle_tool_error=self.format_system_tool_error,
             )
         ]
-
-    async def start_reminder_poller_dynamic(self, get_sessions_fn, get_active_user_ids_fn, poll_interval_seconds: int = 20):
-        """
-        A continuous, non-blocking background loop that polls Neo4j for pending reminders for all users
-        and routes them to the correct user session.
-        """
-        logger.info("Background reminder poller service activated.")
-
-        # Language=cypher
-        check_query = """
-                      WITH datetime($now) AS now
-                          MATCH (u: User)-[:HAS_YEAR]->()-[:HAS_MONTH]->()-[:HAS_DAY]->()-[:HAS_TASK]->(t:Task)
-                      WHERE t.due_time <= now 
-                          AND u.id in $user_id_list
-                          AND t.type = 'REMINDER'
-                          AND t.status = 'PENDING'
-                      SET t.status = 'COMPLETED'
-                      RETURN t.text AS text, t.id AS id, u.id AS user_id
-                      """
-
-        while True:
-            try:
-                active_sessions = get_sessions_fn()
-                active_user_ids = get_active_user_ids_fn()
-
-                if not active_user_ids:
-                    logger.debug("No active sessions online. Skipping reminder database poll.")
-                    await asyncio.sleep(poll_interval_seconds)
-                    continue
-
-                params = {"now": datetime.now().isoformat(),
-                          "user_id_list": active_user_ids
-                          }
-
-                # Execute the query to find pending tasks
-                result = await self.db_client.execute_query(check_query, params)
-
-                tasks_due = result.get("data", [])
-                for task in tasks_due:
-                    reminder_text = task.get("text")
-                    task_id = task.get("id")
-                    user_id = task.get("user_id")  # Get the owner's ID
-
-                    logger.info(f"Poller detected matured timer [{task_id}] for user [{user_id}]")
-
-                    payload = {"task_id": task_id, "text": reminder_text}
-
-                    for target_agent in active_sessions.get(user_id):
-                        # Route the event to the correct connection manager
-                        if target_agent and target_agent.connection_manager:
-                            await target_agent.connection_manager.submit_external_event(payload)
-                        else:
-                            logger.warning(f"Reminder triggered for user [{user_id}], but no active connection found.")
-
-            except Neo4jCircuitBreakerError:
-                logger.debug("Reminder poller paused: Database circuit is OPEN.")
-            except Neo4jClientError as e:
-                logger.error(f"Database error in reminder poller: {e}. Backing off.")
-                await asyncio.sleep(60)
-                continue
-            except asyncio.CancelledError:
-                logger.info("Poller loop received cancellation signal.")
-                raise
-            except Exception as e:
-                logger.error(f"Unexpected exception in reminder poller: {e}", exc_info=True)
-
-            await asyncio.sleep(poll_interval_seconds)
