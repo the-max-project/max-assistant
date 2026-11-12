@@ -46,7 +46,7 @@ async def test_answer_general_question_happy_path():
 
     # Patch the bound runtime chain object and pass a real Python dict for context
     with patch.object(tools, "cypher_generation_chain", mock_chain):
-        result = await tools.answer_general_question(
+        result = await tools.general_db_query(
             question="who is my father?",
             user_info={"user": {"id": 1}}  # FIX: Native dictionary type
         )
@@ -74,7 +74,7 @@ async def test_answer_general_question_database_unavailable_error():
     tools = GeneralQueryTools(db_client=db_client, llm=MagicMock())
 
     with patch.object(tools, "cypher_generation_chain", mock_chain):
-        result = await tools.answer_general_question(
+        result = await tools.general_db_query(
             question="show all entries",
             user_info={"user": {"id": 2}}  # FIX: Native dictionary type
         )
@@ -90,7 +90,7 @@ def test_get_tools_exposes_expected_names():
     tool_names = {tool.name for tool in tools.get_tools()}
 
     expected_tools = {
-        "answer_general_question"
+        "general_db_query"
     }
 
     assert tool_names == expected_tools

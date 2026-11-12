@@ -9,24 +9,26 @@ def test_load_ollama_config_no_file():
     """Test loading config when no file exists"""
     # Create a temporary directory and change to it
     with tempfile.TemporaryDirectory() as tmpdir:
-        old_cwd = os.getcwd()
-        os.chdir(tmpdir)
-        
+        # Set environment variable to point to our test config
+        old_env = os.environ.get('OLLAMA_CONFIG_PATH')
+        os.environ['OLLAMA_CONFIG_PATH'] = tmpdir
         try:
             result = load_ollama_config()
             assert isinstance(result, dict)
             assert result == {}
         finally:
-            os.chdir(old_cwd)
+            # Restore environment
+            if old_env is not None:
+                os.environ['OLLAMA_CONFIG_PATH'] = old_env
+            elif 'OLLAMA_CONFIG_PATH' in os.environ:
+                del os.environ['OLLAMA_CONFIG_PATH']
 
 
 def test_load_ollama_config_with_file():
     """Test loading config from a valid YAML file"""
     # Create a temporary directory and change to it
     with tempfile.TemporaryDirectory() as tmpdir:
-        old_cwd = os.getcwd()
-        os.chdir(tmpdir)
-        
+
         try:
             # Create a test config file
             config_data = {
@@ -41,9 +43,14 @@ def test_load_ollama_config_with_file():
                 },
                 'default_model': 'test-model'
             }
-            
-            with open('ollama_config.yaml', 'w') as f:
+
+            config_file = os.path.join(tmpdir, 'ollama_config.yaml')
+            with open(config_file, 'w') as f:
                 yaml.dump(config_data, f)
+
+            # Set environment variable to point to our test config
+            old_env = os.environ.get('OLLAMA_CONFIG_PATH')
+            os.environ['OLLAMA_CONFIG_PATH'] = config_file
             
             result = load_ollama_config()
             assert isinstance(result, dict)
@@ -54,7 +61,11 @@ def test_load_ollama_config_with_file():
             # Note: default_model is not included in the returned dict from load_ollama_config
             # but can be accessed through get_model_name_from_config function
         finally:
-            os.chdir(old_cwd)
+            # Restore environment
+            if old_env is not None:
+                os.environ['OLLAMA_CONFIG_PATH'] = old_env
+            elif 'OLLAMA_CONFIG_PATH' in os.environ:
+                del os.environ['OLLAMA_CONFIG_PATH']
 
 
 def test_get_ollama_params():
@@ -104,16 +115,16 @@ def test_load_ollama_config_invalid_yaml():
     """Test loading config with invalid YAML content"""
     # Create a temporary directory and change to it
     with tempfile.TemporaryDirectory() as tmpdir:
-        old_cwd = os.getcwd()
-        os.chdir(tmpdir)
-        
+
         try:
+            config_file = os.path.join(tmpdir, 'ollama_config.yaml')
+
             # Create an invalid YAML file
-            with open('ollama_config.yaml', 'w') as f:
+            with open(config_file, 'w') as f:
                 f.write('invalid: yaml: content:')
             
-            result = load_ollama_config()
+            result = load_ollama_config(Path(config_file))
             assert isinstance(result, dict)
             assert result == {}  # Should return empty dict on error
         finally:
-            os.chdir(old_cwd)
+            pass
