@@ -6,7 +6,10 @@ import unicodedata
 from typing import List, Dict, Any, Optional
 from urllib import request
 
+from unittest.mock import AsyncMock, MagicMock
+
 from max_assistant.app_services import AppServices
+from max_assistant.agent.session_mgr import session_manager
 from max_assistant.agent.agent import Agent
 from max_assistant.config import OLLAMA_BASE_URL
 from max_assistant.tools import PersonTools
@@ -42,7 +45,7 @@ async def execute_scenario_workflow(
         username: str,
         steps: List[Dict[str, Any]],
         model_name: str,
-        request=None,
+        scenario_request=None,
         results: Optional[ScenarioResult] = None,
 
 ):
@@ -52,23 +55,29 @@ async def execute_scenario_workflow(
     """
     global _ACTIVE_MODEL
 
+    previous_model = _ACTIVE_MODEL
+
     # Evict the prior model when the model changes across scenario runs
-    if _ACTIVE_MODEL is not None and _ACTIVE_MODEL != model_name:
-        print(f"\n[MODEL ROTATION] Switching from '{_ACTIVE_MODEL}' to '{model_name}'. Unloading previous model...")
-        await unload_ollama_model(_ACTIVE_MODEL)
+    if previous_model is not None and _ACTIVE_MODEL != model_name:
+        print(f"\n[MODEL ROTATION] Switching from '{previous_model}' to '{model_name}'. Unloading previous model...")
+        await unload_ollama_model(previous_model)
 
     _ACTIVE_MODEL = model_name
 
-    testcase_name = "Unknown_Test_Case"
-    if request is not None and hasattr(request, "node"):
-        testcase_name = request.node.name
-
+    if scenario_request is not None and hasattr(scenario_request, "node"):
+        testcase_name = scenario_request.node.name
         app_services = await AppServices.create(model_name=model_name)
+    else:
+        print("No request or node found, skipping AppServices creation.")
+        return
+
     execution_times: List[float ] = []
     responses: List[str] = []
     success = False
     thread_id = None
     step_results: List[StepResult] = []
+    agent = None
+    user_id = None
 
     try:
         if not app_services.llm_ready_event.is_set():
@@ -82,6 +91,15 @@ async def execute_scenario_workflow(
         agent = Agent(app_services.reasoning_engine, user_data)
         thread_id = agent.get_thread_id()
 
+        # Wire a spy connection_manager & register with session_manager
+        # so NotificationRouter can dispatch pushed events during tests
+        mock_conn_mgr = MagicMock()
+        mock_conn_mgr.submit_external_event = AsyncMock()
+        agent.connection_manager = mock_conn_mgr
+
+        user_id = user_data.get("id", username)
+        session_manager.register(user_id, agent)  # or session_manager.add_agent(user_id, agent)
+
         # This creates a highly scannable visual header inside PyCharm's console window
         print("\n" + "=" * 80)
         print(f" WORKING THREAD ID : {thread_id}")
@@ -93,53 +111,73 @@ async def execute_scenario_workflow(
     # Execute conversational array step-by-step
 
         for index, step in enumerate(steps, start=1):
-
-            if "user_input" not in step:
-                raise ValueError(f"Step {index} in testcase '{testcase_name}' is missing required 'user_input' key.")
-
-            user_input = step["user_input"]
             validators = step.get("validators", [])
-
-            # Uniform normalization of user input to match LLM standards
-            if isinstance(user_input, str):
-                user_input = unicodedata.normalize("NFKC", user_input)
-
-            # Track start time using perf_counter for high resolution
             start_time = time.perf_counter()
 
-            # Programmatic code execution bypassing AsyncConsoleReader/sys.stdin
-            actual_response = await agent.ainvoke(user_input)
+            # --- BRANCH A: Direct Event Bus Injection ---
+            if "inject_event" in step:
+                event_cfg = step["inject_event"]
+                topic = event_cfg["topic"]
+                payload = dict(event_cfg.get("payload", {}))
+                # Default user_id to the scenario's resolved user if omitted
+                payload.setdefault("user_id", user_id)
+                settle_time = event_cfg.get("settle_time", 0.1)
 
-            # Track end time, calculate duration, and append to list
-            end_time = time.perf_counter()
-            step_duration = end_time - start_time
+                # Reset mock before injecting so we only capture events from this step
+                mock_conn_mgr.submit_external_event.reset_mock()
+
+                await app_services.event_bus.inject_test_event(
+                    topic=topic,
+                    payload=payload,
+                    settle_time=settle_time,
+                )
+
+                # Extract pushed payload (or pass through agent.handle_push_event if testing full LLM response)
+                if mock_conn_mgr.submit_external_event.called:
+                    pushed_payload = mock_conn_mgr.submit_external_event.call_args[0][0]
+                    # Option 1: Validate the raw pushed text directly:
+                    actual_response = pushed_payload.get("text", json.dumps(pushed_payload))
+                    # Option 2: Or feed it through the agent's push handler to test the LLM's spoken alert:
+                    # actual_response = await agent.handle_push_event(pushed_payload)
+                else:
+                    actual_response = ""
+
+                step_label = f"[EVENT INJECT: {topic}]"
+
+            # --- BRANCH B: Standard User Chat Input ---
+            elif "user_input" in step:
+                user_input = step["user_input"]
+                if isinstance(user_input, str):
+                    user_input = unicodedata.normalize("NFKC", user_input)
+                actual_response = await agent.ainvoke(user_input)
+                step_label = user_input
+            else:
+                raise ValueError(
+                    f"Step {index} in testcase '{testcase_name}' must contain 'user_input' or 'inject_event'."
+                )
+
+            step_duration = time.perf_counter() - start_time
             execution_times.append(step_duration)
 
-            # Normalize LLM Output
             if isinstance(actual_response, str):
-                # Safely converts \u202f, \xa0, etc. into standard spaces " "
-                # without destroying newlines (\n)
                 actual_response = unicodedata.normalize("NFKC", actual_response)
             responses.append(actual_response)
 
-            # Fire off pluggable validators conditionally
+            # Run existing validators unchanged
             for validator_fn in validators:
-                # use the same model for validation as the one under test
                 sig = inspect.signature(validator_fn)
                 kwargs = {}
                 if "model_name" in sig.parameters:
                     kwargs["model_name"] = SEMANTIC_VALIDATOR_MODEL or model_name
 
                 if inspect.iscoroutinefunction(validator_fn):
-                    # Natively await async validators (like semantic evaluations or graph checks)
                     await validator_fn(actual_response, app_services.db_client, **kwargs)
                 else:
-                    # Execute standard synchronous substring/regex assertions directly
                     validator_fn(actual_response, app_services.db_client, **kwargs)
 
             step_results.append(StepResult(
                 step=index,
-                user_input=user_input,
+                user_input=step_label,
                 actual_result=actual_response,
                 elapsed_time=step_duration
             ))
@@ -147,6 +185,9 @@ async def execute_scenario_workflow(
         success = True
 
     finally:
+        if agent and user_id:
+            session_manager.unregister(user_id, agent)
+
         # Guarantee safe database connection pooling teardown
         if app_services.db_client:
             await app_services.db_client.close()

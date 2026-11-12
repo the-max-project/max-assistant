@@ -47,19 +47,19 @@ async def lifespan(fastapi_app: FastAPI):
     fastapi_app.state.app_services = None
 
     try:
-        # 1. Initialize Service Singletons
+        # Initialize Service Singletons
         services = await AppServices.create()
         fastapi_app.state.app_services = services
 
-        # 2. Start the Persistent Time Scheduler (Priority Heap hydrated from Neo4j)
+        # Start the Persistent Time Scheduler (Priority Heap hydrated from Neo4j)
         logger.info("Starting PersistentTimeScheduler...")
         await services.time_scheduler.start()
 
-        # 3. Start the Background CEP Worker Thread (Raw MQTT -> Synthetic state)
+        # Start the Background CEP Worker Thread (Raw MQTT -> Synthetic state)
         logger.info("Starting PresenceCEPWorker background thread...")
         services.cep_worker.start()
 
-        # 4. Start the Main Loop MQTT Ingestion Service (Synthetic state -> EventBus)
+        # Start the Main Loop MQTT Ingestion Service (Synthetic state -> EventBus)
         logger.info("Starting MQTTService subscriber...")
         await services.mqtt_service.start()
 
@@ -74,14 +74,26 @@ async def lifespan(fastapi_app: FastAPI):
     services: AppServices | None = fastapi_app.state.app_services
 
     if services:
-        # 5. Stop the Persistent Time Scheduler
+        # Stop the Main Loop MQTT Ingestion Service
+        logger.info("Stopping MQTTService subscriber...")
+        try:
+            await services.mqtt_service.stop()
+        except Exception as e:
+            logger.error(f"Error stopping MQTT service: {e}", exc_info=True)
+
+        # Signal the Background CEP Worker Thread to Stop
+        if services.cep_worker:
+            logger.info("Stopping PresenceCEPWorker background thread...")
+            services.cep_worker.stop()
+
+        # Stop the Persistent Time Scheduler
         logger.info("Stopping PersistentTimeScheduler...")
         try:
             await services.time_scheduler.stop()
         except Exception as e:
             logger.error(f"Error stopping time scheduler: {e}", exc_info=True)
 
-        # 6. Defensive Database Client Termination
+        # Defensive Database Client Termination - after all other services have stopped
         if services.db_client:
             logger.info("Closing active Neo4j client connection pooling...")
             try:

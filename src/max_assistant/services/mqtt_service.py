@@ -3,18 +3,34 @@
 import asyncio
 import json
 import logging
+from typing import Optional
 import aiomqtt
 
 logger = logging.getLogger(__name__)
+
 
 class MQTTService:
     def __init__(self, broker_host: str, event_bus, broker_port: int = 1883):
         self.broker_host = broker_host
         self.broker_port = broker_port
         self.event_bus = event_bus
+        self._task: Optional[asyncio.Task] = None
 
     async def start(self):
-        asyncio.create_task(self._run())
+        if self._task is not None and not self._task.done():
+            return
+        self._task = asyncio.create_task(self._run())
+
+    async def stop(self):
+        """Cancels the background MQTT listener task and waits for a clean teardown."""
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+            logger.info("MQTTService: Stopped.")
 
     async def _run(self):
         while True:

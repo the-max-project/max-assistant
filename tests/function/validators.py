@@ -137,9 +137,14 @@ def build_steps_from_yaml(yaml_steps: list) -> list:
 
             validators.append(validator_instance)
 
-        processed_steps.append({
-            "user_input": step["user_input"],
-            "validators": validators
-        })
+        step_dict = {"validators": validators}
+        if "inject_event" in step:
+            step_dict["inject_event"] = step["inject_event"]
+        elif "user_input" in step:
+            step_dict["user_input"] = step["user_input"]
+        else:
+            raise ValueError(f"Step missing 'user_input' or 'inject_event': {step}")
+
+        processed_steps.append(step_dict)
 
     return processed_steps

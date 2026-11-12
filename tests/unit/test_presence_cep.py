@@ -1,5 +1,3 @@
-import asyncio
-import json
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -102,8 +100,6 @@ class TestPresenceCEPWorker:
         # Call evaluate_sequences - should not raise exception
         await presence_cep_worker._evaluate_sequences(mock_client, 1000.0)
         
-        # Should not crash and should not call publish
-
     def test_match_sequence_handles_empty_history(self, presence_cep_worker):
         """Verifies that match_sequence handles empty sensor history correctly."""
         # Clear the sensor history

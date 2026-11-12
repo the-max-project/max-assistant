@@ -37,8 +37,10 @@ class PresenceCEPWorker:
         self.config_path = resolve_project_path(config_path)
 
         self._rules: List[Dict[str, Any]] = []
-        self._sensor_history: List[Dict[str, Any]] = []  # Ring buffer of recent state events
+        self._sensor_history: List[Dict[str, Any]] = []
         self._thread: Optional[threading.Thread] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._async_stop_event: Optional[asyncio.Event] = None
         self._stop_event = threading.Event()
 
         self._load_config()
@@ -77,35 +79,90 @@ class PresenceCEPWorker:
         if self._thread is not None and self._thread.is_alive():
             return
 
+        self._stop_event.clear()
         thread = threading.Thread(target=self._run_thread, daemon=True, name="PresenceCEPThread")
         thread.start()
         self._thread = thread
         logger.info("PresenceCEPWorker: Background thread started.")
 
+    def stop(self, timeout: float = 2.0):
+        """Signals the CEP worker thread to stop and joins the thread."""
+        self._stop_event.set()
+        if self._loop is not None and self._async_stop_event is not None and not self._loop.is_closed():
+            stop_evt = self._async_stop_event
+            self._loop.call_soon_threadsafe(stop_evt.set)
+
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+        self._thread = None
+        logger.info("PresenceCEPWorker: Background thread stopped.")
+
     def _run_thread(self):
         """Creates an independent asyncio loop for the background thread."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        self._loop = loop
+        self._async_stop_event = asyncio.Event()
         try:
             loop.run_until_complete(self._listen_and_synthesize())
         finally:
             loop.close()
+            self._loop = None
+            self._async_stop_event = None
 
     async def _listen_and_synthesize(self):
         """Main listening loop subscribing to raw hardware telemetry."""
-        while not self._stop_event.is_set():
-            try:
-                async with aiomqtt.Client(self.broker_host, port=self.broker_port) as client:
-                    await client.subscribe("home/+/sensor/#")
-                    logger.info("PresenceCEPWorker: Subscribed to raw sensors.")
-                    async for message in client.messages:
-                        await self._process_raw_sensor(client, message)
-            except aiomqtt.MqttError as e:
-                logger.warning(f"PresenceCEPWorker: Broker disconnected: {e}. Retrying in 5s...")
-                await asyncio.sleep(5)
-            except Exception as e:
-                logger.error(f"PresenceCEPWorker: Loop error: {e}", exc_info=True)
-                await asyncio.sleep(2)
+        async_stop_event = self._async_stop_event
+        if async_stop_event is None:
+            async_stop_event = asyncio.Event()
+            self._async_stop_event = async_stop_event
+
+        if self._stop_event.is_set():
+            async_stop_event.set()
+
+        stop_task = asyncio.create_task(async_stop_event.wait())
+
+        async def _next_message(iterator):
+            return await anext(iterator)
+
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    async with aiomqtt.Client(self.broker_host, port=self.broker_port) as client:
+                        await client.subscribe("home/+/sensor/#")
+                        logger.info("PresenceCEPWorker: Subscribed to raw sensors.")
+                        messages = aiter(client.messages)
+                        msg_task = asyncio.create_task(_next_message(messages))
+                        try:
+                            while not self._stop_event.is_set():
+                                done, _ = await asyncio.wait(
+                                    {msg_task, stop_task},
+                                    return_when=asyncio.FIRST_COMPLETED
+                                )
+                                if stop_task in done:
+                                    break
+                                message = msg_task.result()
+                                await self._process_raw_sensor(client, message)
+                                msg_task = asyncio.create_task(_next_message(messages))
+                        finally:
+                            if not msg_task.done():
+                                msg_task.cancel()
+
+                except StopAsyncIteration:
+                    break
+                except aiomqtt.MqttError as e:
+                    if self._stop_event.is_set():
+                        break
+                    logger.warning(f"PresenceCEPWorker: Broker disconnected: {e}. Retrying in 5s...")
+                    await asyncio.sleep(5)
+                except Exception as e:
+                    if self._stop_event.is_set():
+                        break
+                    logger.error(f"PresenceCEPWorker: Loop error: {e}", exc_info=True)
+                    await asyncio.sleep(2)
+        finally:
+            if not stop_task.done():
+                stop_task.cancel()
 
     async def _process_raw_sensor(self, client: aiomqtt.Client, message):
         """Parses incoming MQTT sensor telemetry and evaluates sequence triggers."""
