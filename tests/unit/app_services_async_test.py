@@ -94,6 +94,7 @@ def test_direct_instantiation_guard_raises_runtime_error():
             llm_ready_event=MagicMock(),
             preload_task=MagicMock(),
             event_bus=MagicMock(),
+            event_monitor=MagicMock(),
             time_scheduler=MagicMock(),
             mqtt_service=MagicMock(),
             cep_worker=MagicMock(),
