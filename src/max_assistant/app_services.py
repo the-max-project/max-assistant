@@ -30,6 +30,7 @@ from max_assistant.services.time_scheduler import PersistentTimeScheduler
 from max_assistant.services.presence_cep import PresenceCEPWorker
 from max_assistant.services.mqtt_service import MQTTService
 from max_assistant.services.notification_router import NotificationRouter
+from max_assistant.services.event_monitor import EventMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ class AppServices:
             llm_ready_event: asyncio.Event,
             preload_task: asyncio.Task,
             event_bus: LocalEventBus,
+            event_monitor: EventMonitor,
             time_scheduler: PersistentTimeScheduler,
             mqtt_service: MQTTService,
             cep_worker: PresenceCEPWorker,
@@ -72,6 +74,7 @@ class AppServices:
 
         # Event-driven infrastructure
         self.event_bus = event_bus
+        self.event_monitor = event_monitor
         self.time_scheduler = time_scheduler
         self.mqtt_service = mqtt_service
         self.cep_worker = cep_worker
@@ -92,6 +95,7 @@ class AppServices:
 
             # 2. Initialize Event Bus and Time Scheduler
             event_bus = LocalEventBus()
+            event_monitor = EventMonitor(event_bus=event_bus)
             time_scheduler = PersistentTimeScheduler(db_client=db_client, event_bus=event_bus)
 
             # 3. Initialize and Populate Tool Registry (Injecting time_scheduler into providers)
@@ -123,6 +127,7 @@ class AppServices:
                 llm_ready_event=llm_ready_event,
                 preload_task=preload_task,
                 event_bus=event_bus,
+                event_monitor=event_monitor,
                 time_scheduler=time_scheduler,
                 mqtt_service=mqtt_service,
                 cep_worker=cep_worker,

@@ -4,6 +4,9 @@
     "formatters": {
         "standard_flat": {
             "format": "[%(levelname)s] %(asctime)s - %(name)s (line:%(lineno)d): %(message)s"
+        },
+        "raw_message": {
+            "format": "%(message)s"
         }
     },
     "handlers": {
@@ -30,6 +33,15 @@
             "encoding": "utf8",
             "level": "ERROR",
             "delay": true
+        },
+        "event_monitor_file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "formatter": "raw_message",
+            "filename": "logs/events.jsonl",
+            "maxBytes": 10485760,
+            "backupCount": 5,
+            "encoding": "utf8",
+            "delay": true
         }
     },
     "loggers": {
@@ -49,6 +61,11 @@
         "max_assistant.tools":{
             "level": "INFO",
             "propagate": true
+        },
+        "max_assistant.event_monitor": {
+            "level": "INFO",
+            "propagate": false,
+            "handlers": ["event_monitor_file"]
         }
     }
 }

@@ -93,6 +93,10 @@ async def lifespan(fastapi_app: FastAPI):
         except Exception as e:
             logger.error(f"Error stopping time scheduler: {e}", exc_info=True)
 
+        # Stop EventMonitor after all producers have stopped so trailing events are captured
+        if services.event_monitor:
+            services.event_monitor.stop()
+
         # Defensive Database Client Termination - after all other services have stopped
         if services.db_client:
             logger.info("Closing active Neo4j client connection pooling...")
