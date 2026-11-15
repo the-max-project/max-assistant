@@ -1,8 +1,15 @@
 # Copyright (c) 2026, Robert Begg
 # Licensed under the MIT License. See LICENSE for more details.
 import logging
+from typing import Set
+
+from max_assistant.events.bus import (
+    TOPIC_CHAT_TURN_COMPLETED,
+    TOPIC_CHAT_TURN_STARTED,
+)
 
 logger = logging.getLogger(__name__)
+
 
 class NotificationRouter:
     """Subscribes to internal bus events, updates DB state, and alerts active user sessions."""
@@ -11,10 +18,27 @@ class NotificationRouter:
         self.event_bus = event_bus
         self.session_mgr = session_mgr
         self.db_client = db_client
+        self._active_users: Set[str] = set()
 
         # Register event handlers
         self.event_bus.subscribe("task.due", self.on_task_due)
         self.event_bus.subscribe("presence.*", self.on_presence_change)
+        self.event_bus.subscribe(TOPIC_CHAT_TURN_STARTED, self.on_chat_turn_started)
+        self.event_bus.subscribe(TOPIC_CHAT_TURN_COMPLETED, self.on_chat_turn_completed)
+
+    async def on_chat_turn_started(self, _topic: str, data: dict):
+        user_id = data.get("user_id")
+        if user_id:
+            self._active_users.add(str(user_id))
+
+    async def on_chat_turn_completed(self, _topic: str, data: dict):
+        user_id = data.get("user_id")
+        if user_id:
+            self._active_users.discard(str(user_id))
+
+    def is_user_in_active_turn(self, user_id: str) -> bool:
+        """Returns True if the user currently has an in-flight LLM/TTS turn."""
+        return str(user_id) in self._active_users
 
     async def on_task_due(self, _topic: str, data: dict):
         user_id = data.get("user_id")
@@ -59,7 +83,7 @@ class NotificationRouter:
                 await self._broadcast_to_user(user_id, payload)
 
     async def _broadcast_to_user(self, user_id: str, payload: dict):
-        """Pushes events into active WebSocket connections via ConnectionManager[cite: 1, 4]."""
+        """Pushes events into active WebSocket connections via ConnectionManager."""
         active_agents = self.session_mgr.get_agents(user_id)
         if not active_agents:
             logger.warning(f"No active session found for user {user_id}. Event held.")

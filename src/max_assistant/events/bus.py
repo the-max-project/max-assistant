@@ -8,6 +8,12 @@ from typing import Callable, Coroutine, Dict, Set
 
 logger = logging.getLogger(__name__)
 
+# Conversational & Turn Lifecycle Topics
+TOPIC_CHAT_TURN_STARTED = "chat.turn.started"
+TOPIC_CHAT_TURN_COMPLETED = "chat.turn.completed"
+TOPIC_USER_SPEECH_TRANSCRIBED = "user.speech.transcribed"
+TOPIC_AGENT_RESPONSE_GENERATED = "agent.response.generated"
+
 class LocalEventBus:
     """Asynchronous publish-subscribe event bus supporting wildcard routing."""
 

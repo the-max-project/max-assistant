@@ -7,7 +7,7 @@ import asyncio
 import json
 import logging
 from asyncio import Queue
-from typing import List
+from typing import Any, Dict, List
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -18,6 +18,12 @@ from max_assistant.agent.session_mgr import session_manager
 from max_assistant.app_services import AppServices
 from max_assistant.tools import PersonTools
 from max_assistant.config import TTS_VOICE
+from max_assistant.events.bus import (
+    TOPIC_AGENT_RESPONSE_GENERATED,
+    TOPIC_CHAT_TURN_COMPLETED,
+    TOPIC_CHAT_TURN_STARTED,
+    TOPIC_USER_SPEECH_TRANSCRIBED,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,17 +37,40 @@ class ConnectionManager:
         self.stt_client = STTClient()
         self.tts_client = TTSClient()
         self.app_services = app_services
+        self.event_bus = getattr(app_services, "event_bus", None)
 
         # Decoupled task interaction channels
         self._binary_input_queue = Queue()
         self._text_input_queue = Queue()
         self._client_output_queue = Queue()
-        self._external_event_queue = Queue()
+
+        # Priority-separated queues for single-consumer turn serialization
+        self._user_turn_queue: Queue[Dict[str, str]] = Queue()
+        self._external_event_queue: Queue[Dict[str, Any]] = Queue()
+        self._turn_lock = asyncio.Lock()
+        self._turn_signal = asyncio.Event()
+        self.is_turn_active: bool = False
 
         self._shutdown_event = asyncio.Event()
         self._authenticated = asyncio.Event()
         self._tasks: List[asyncio.Task] = []
         self._registered_user_id = None  # Track state for deterministic cleanup
+
+    async def _publish_event(self, topic: str, data: dict):
+        """Safely publishes lifecycle events to LocalEventBus when configured."""
+        if self.event_bus is not None:
+            await self.event_bus.publish(topic, data)
+
+    def _get_event_context(self) -> Dict[str, Any]:
+        """Builds standard user/thread metadata for lifecycle event payloads."""
+        user_id = self._registered_user_id or (
+            getattr(self.agent, "username", None) if self.agent else None
+        )
+        thread_id = self.agent.get_thread_id() if self.agent and hasattr(self.agent, "get_thread_id") else None
+        return {
+            "user_id": user_id,
+            "thread_id": thread_id,
+        }
 
     async def handle_connection(self):
         """Acts as connection supervisor, coordinating loops and deterministic teardown."""
@@ -60,14 +89,16 @@ class ConnectionManager:
                     logger.error(f"A connection task failed: {task.exception()}", exc_info=True)
         finally:
             self._shutdown_event.set()
+            self._turn_signal.set()  # Unblock _unified_turn_loop on teardown
 
             # Empty remaining elements to prevent queue join deadlocks
-            while not self._text_input_queue.empty():
-                try:
-                    self._text_input_queue.get_nowait()
-                    self._text_input_queue.task_done()
-                except asyncio.QueueEmpty:
-                    break
+            for q in (self._text_input_queue, self._user_turn_queue, self._external_event_queue):
+                while not q.empty():
+                    try:
+                        q.get_nowait()
+                        q.task_done()
+                    except asyncio.QueueEmpty:
+                        break
 
             # Deterministic centralized unregistration safeguard
             if self._registered_user_id:
@@ -91,8 +122,14 @@ class ConnectionManager:
                 self._shutdown_event.set()
 
     async def submit_external_event(self, payload: dict):
-        """Public API for pushing external polling notices into this connection session."""
+        """Public API for pushing external polling/bus notices into this connection session."""
         await self._external_event_queue.put(payload)
+        self._turn_signal.set()
+
+    async def _enqueue_user_turn(self, text: str, source: str):
+        """Queues a user utterance (voice or text) for serialized execution."""
+        await self._user_turn_queue.put({"text": text, "source": source})
+        self._turn_signal.set()
 
     async def _run_main_logic(self):
         """Warms up core assets and launches processing loops concurrent executors."""
@@ -104,7 +141,7 @@ class ConnectionManager:
         processing_tasks = [
             asyncio.create_task(self._agent_loop()),
             asyncio.create_task(self._text_input_handler_loop()),
-            asyncio.create_task(self._external_event_loop()),
+            asyncio.create_task(self._unified_turn_loop()),
             asyncio.create_task(self._enforce_auth_timeout()),
         ]
         self._tasks.extend(processing_tasks)
@@ -212,9 +249,9 @@ class ConnectionManager:
                     self.agent.set_voice(client_dict["voice"])
 
                 if "text" in client_dict:
-                    # FIX: Route text directly into an explicit execution runner task
-                    # instead of recursively pushing back onto the raw transport queue
-                    asyncio.create_task(self._execute_agent_text_turn(client_dict["text"]))
+                    cleaned_text = client_dict["text"].strip()
+                    if cleaned_text:
+                        await self._enqueue_user_turn(cleaned_text, source="text")
 
             except json.JSONDecodeError:
                 logging.warning(f"Discarding malformed JSON text framing payload: {text_data}")
@@ -243,24 +280,6 @@ class ConnectionManager:
             logger.info("Sending synthesized audio Response.")
             await self._client_output_queue.put(output_audio)
 
-    async def _execute_agent_text_turn(self, user_text: str):
-        """Isolated wrapper task to run text turns through the reasoning engine without blocking loop I/O."""
-        try:
-            cleaned_text = user_text.strip()
-            if not cleaned_text:
-                return
-
-            # Mirror typed message directly to client output logs for interface symmetry
-            echo_payload = {"data": cleaned_text, "source": "user", "type": "text_echo"}
-            await self._client_output_queue.put(json.dumps(echo_payload))
-
-            # Run through reasoning graph
-            llm_response = await self.agent.ainvoke(cleaned_text)
-            await self._send_assistant_response(llm_response)
-
-        except Exception as e:
-            logger.error(f"Error processing text-to-agent inference pass: {e}", exc_info=True)
-
     async def _agent_loop(self):
         """Processes continuous audio chunks received from streaming speech input."""
         try:
@@ -273,9 +292,15 @@ class ConnectionManager:
                         continue
 
                     await self._client_output_queue.put(stt_message_str)
-
-                    llm_response = await self.agent.ainvoke(transcript)
-                    await self._send_assistant_response(llm_response)
+                    await self._publish_event(
+                        TOPIC_USER_SPEECH_TRANSCRIBED,
+                        {
+                            **self._get_event_context(),
+                            "text": transcript,
+                            "source": "voice",
+                        },
+                    )
+                    await self._enqueue_user_turn(transcript, source="voice")
 
                 except (json.JSONDecodeError, AttributeError) as e:
                     logging.warning(f"Could not parse STT stream framework: {e}")
@@ -285,25 +310,118 @@ class ConnectionManager:
             logging.error(f"Error executing streaming audio client loop: {e}", exc_info=True)
             self._shutdown_event.set()
 
-    async def _external_event_loop(self):
-        """Handles background notifications dispatched via automated polling engines."""
+    async def _unified_turn_loop(self):
+        """
+        Single consumer loop that serializes all LangGraph turns on this session,
+        always prioritizing direct user queries over background events.
+        """
         try:
             while not self._shutdown_event.is_set():
-                event_payload = await self._external_event_queue.get()
-                logger.info(f"EXTERNAL_EVENT_HANDLER: Processing target push: {event_payload}")
+                while (
+                    self._user_turn_queue.empty()
+                    and self._external_event_queue.empty()
+                    and not self._shutdown_event.is_set()
+                ):
+                    self._turn_signal.clear()
+                    await self._turn_signal.wait()
 
-                llm_response = await self.agent.handle_push_event(event_payload)
-                if llm_response:
-                    # Custom overrides can still be handled before or inside the helper if needed.
-                    # Here we leverage the unified sender channel:
-                    await self._send_assistant_response(llm_response)
+                if self._shutdown_event.is_set():
+                    break
 
-                self._external_event_queue.task_done()
+                if not self._user_turn_queue.empty():
+                    turn_item = await self._user_turn_queue.get()
+                    try:
+                        await self._execute_user_turn(turn_item["text"], turn_item["source"])
+                    finally:
+                        self._user_turn_queue.task_done()
+                elif not self._external_event_queue.empty():
+                    event_payload = await self._external_event_queue.get()
+                    try:
+                        await self._execute_external_turn(event_payload)
+                    finally:
+                        self._external_event_queue.task_done()
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logging.error(f"Error inside proactive push system supervisor loop: {e}", exc_info=True)
+            logger.error(f"Error inside unified turn coordinator loop: {e}", exc_info=True)
             self._shutdown_event.set()
+
+    async def _execute_user_turn(self, user_text: str, source: str):
+        """Executes an interactive user turn under the session lock."""
+        if self.agent is None:
+            logger.warning("Dropping user turn received before agent authentication.")
+            return
+
+        async with self._turn_lock:
+            ctx = self._get_event_context()
+            self.is_turn_active = True
+            await self._publish_event(
+                TOPIC_CHAT_TURN_STARTED,
+                {**ctx, "is_background": False, "source": source},
+            )
+
+            try:
+                if source == "text":
+                    echo_payload = {"data": user_text, "source": "user", "type": "text_echo"}
+                    await self._client_output_queue.put(json.dumps(echo_payload))
+
+                llm_response = await self.agent.ainvoke(user_text)
+                if llm_response:
+                    await self._publish_event(
+                        TOPIC_AGENT_RESPONSE_GENERATED,
+                        {**ctx, "text": llm_response, "is_background": False},
+                    )
+                    await self._send_assistant_response(llm_response)
+            except Exception as e:
+                logger.error(f"Error processing user turn through reasoning engine: {e}", exc_info=True)
+            finally:
+                self.is_turn_active = False
+                await self._publish_event(
+                    TOPIC_CHAT_TURN_COMPLETED,
+                    {**ctx, "is_background": False, "source": source},
+                )
+                if not self._user_turn_queue.empty() or not self._external_event_queue.empty():
+                    self._turn_signal.set()
+
+    async def _execute_external_turn(self, event_payload: Dict[str, Any]):
+        """Executes a background event turn once the lock is free and no user query is waiting."""
+        if self.agent is None:
+            logger.warning("Dropping external event received before agent authentication.")
+            return
+
+        async with self._turn_lock:
+            # Yield immediately if a user utterance arrived while acquiring the lock
+            if not self._user_turn_queue.empty():
+                await self._external_event_queue.put(event_payload)
+                self._turn_signal.set()
+                return
+
+            ctx = self._get_event_context()
+            self.is_turn_active = True
+            await self._publish_event(
+                TOPIC_CHAT_TURN_STARTED,
+                {**ctx, "is_background": True},
+            )
+
+            try:
+                logger.info(f"EXTERNAL_EVENT_HANDLER: Processing target push: {event_payload}")
+                llm_response = await self.agent.handle_push_event(event_payload)
+                if llm_response:
+                    await self._publish_event(
+                        TOPIC_AGENT_RESPONSE_GENERATED,
+                        {**ctx, "text": llm_response, "is_background": True},
+                    )
+                    await self._send_assistant_response(llm_response)
+            except Exception as e:
+                logger.error(f"Error inside proactive push turn execution: {e}", exc_info=True)
+            finally:
+                self.is_turn_active = False
+                await self._publish_event(
+                    TOPIC_CHAT_TURN_COMPLETED,
+                    {**ctx, "is_background": True},
+                )
+                if not self._user_turn_queue.empty() or not self._external_event_queue.empty():
+                    self._turn_signal.set()
 
     @staticmethod
     async def _cancel_tasks(tasks: List[asyncio.Task]):
