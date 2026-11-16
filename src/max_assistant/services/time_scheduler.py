@@ -21,6 +21,10 @@ class PersistentTimeScheduler:
         self._running = False
         self._loop_task: asyncio.Task | None = None
 
+    def wake(self) -> None:
+        """Signals the scheduler loop to immediately re-evaluate deferred tasks."""
+        self._wake_event.set()
+
     async def schedule(self, task_id: str, user_id: str, text: str, due_epoch: float, expires_epoch: float, can_wake_user: bool):
         heapq.heappush(self._heap, (due_epoch, task_id, user_id, text, expires_epoch, can_wake_user))
         self._wake_event.set()

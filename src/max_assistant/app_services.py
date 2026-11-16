@@ -114,7 +114,8 @@ class AppServices:
             notification_router = NotificationRouter(
                 event_bus=event_bus,
                 session_mgr=session_manager,
-                db_client=db_client
+                db_client=db_client,
+                time_scheduler=time_scheduler
             )
 
             # 6. Return the fully configured container instance

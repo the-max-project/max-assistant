@@ -108,11 +108,18 @@ class TestNotificationRouter:
             await notification_router.on_presence_change("presence.bedroom", {
                 "room": "bedroom",
                 "state": "vacated",
+                "scope": "premise",
+                "out_location": "out",
                 "user_id": "user123"
             })
             
             # Verify database queries were called
             assert mock_db_client.execute_query.call_count == 2
+
+            # Verify first query marks user away / 'out'
+            first_query, first_params = mock_db_client.execute_query.call_args_list[0][0]
+            assert "u.presence = 'away'" in first_query
+            assert first_params == {"user_id": "user123", "out_location": "out"}
             
             # Verify broadcast was called with correct payload
             mock_broadcast.assert_called_once_with(

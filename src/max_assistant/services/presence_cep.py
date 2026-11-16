@@ -1,11 +1,13 @@
 # Copyright (c) 2026, Robert Begg
 # Licensed under the MIT License. See LICENSE for more details.
 """
-Threaded synthetic sensor worker for presence debouncing and multi-sensor sequence correlation.
+Threaded synthetic sensor worker for presence debouncing, multi-sensor sequence correlation,
+and sleep/wake state inference.
 Loads sequential trigger rules from a configuration file (YAML/JSON) anchored to the project root.
 Supports both 4-part (home/{room}/sensor/{type}) and 5-part (home/{room}/sensor/{type}/{name}) topics.
 """
 import asyncio
+from datetime import datetime
 import json
 import logging
 import threading
@@ -24,20 +26,35 @@ logger = logging.getLogger(__name__)
 
 
 class PresenceCEPWorker:
-    """Threaded synthetic sensor worker for presence debouncing and sequence matching."""
+    """Threaded synthetic sensor worker for presence debouncing, sequence matching, and sleep tracking."""
 
     def __init__(
             self,
             broker_host: str = "127.0.0.1",
             broker_port: int = 1883,
-            config_path: str = "cep_config.yaml"
+            config_path: str = "cep_config.yaml",
+            sleep_inactivity_seconds: float = 1800.0,
+            sleep_start_hour: int = 22,
+            sleep_end_hour: int = 7,
     ):
         self.broker_host = broker_host
         self.broker_port = broker_port
         self.config_path = resolve_project_path(config_path)
 
+        # Sleep detection configuration
+        self.sleep_inactivity_seconds = sleep_inactivity_seconds
+        self.sleep_start_hour = sleep_start_hour
+        self.sleep_end_hour = sleep_end_hour
+
         self._rules: List[Dict[str, Any]] = []
         self._sensor_history: List[Dict[str, Any]] = []
+        self._last_published_state: Dict[str, str] = {}
+
+        # Sleep state tracking
+        self._sleep_state: str = "awake"
+        self._last_sleep_activity: float = time.time()
+        self._last_active_user_id: str = "default_user"
+
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._async_stop_event: Optional[asyncio.Event] = None
@@ -46,7 +63,7 @@ class PresenceCEPWorker:
         self._load_config()
 
     def _load_config(self):
-        """Loads CEP sequence rules from a YAML or JSON file."""
+        """Loads CEP sequence rules and optional sleep thresholds from a YAML or JSON file."""
         if not self.config_path.exists():
             logger.warning(
                 f"CEP config '{self.config_path}' not found. Falling back to default single-room door/pir heuristic."
@@ -66,10 +83,19 @@ class PresenceCEPWorker:
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 if self.config_path.suffix.lower() in (".yaml", ".yml") and yaml:
-                    data = yaml.safe_load(f)
+                    data = yaml.safe_load(f) or {}
                 else:
                     data = json.load(f)
                 self._rules = data.get("rules", [])
+
+                sleep_cfg = data.get("sleep", {})
+                if sleep_cfg:
+                    self.sleep_inactivity_seconds = float(
+                        sleep_cfg.get("inactivity_seconds", self.sleep_inactivity_seconds)
+                    )
+                    self.sleep_start_hour = int(sleep_cfg.get("start_hour", self.sleep_start_hour))
+                    self.sleep_end_hour = int(sleep_cfg.get("end_hour", self.sleep_end_hour))
+
                 logger.info(f"PresenceCEPWorker: Loaded {len(self._rules)} sequence rules from '{self.config_path}'.")
         except Exception as e:
             logger.error(f"PresenceCEPWorker: Error loading config file '{self.config_path}': {e}", exc_info=True)
@@ -127,10 +153,12 @@ class PresenceCEPWorker:
 
         try:
             while not self._stop_event.is_set():
+                sleep_task: Optional[asyncio.Task] = None
                 try:
                     async with aiomqtt.Client(self.broker_host, port=self.broker_port) as client:
                         await client.subscribe("home/+/sensor/#")
                         logger.info("PresenceCEPWorker: Subscribed to raw sensors.")
+                        sleep_task = asyncio.create_task(self._sleep_monitor_loop(client, async_stop_event))
                         messages = aiter(client.messages)
                         msg_task = asyncio.create_task(_next_message(messages))
                         try:
@@ -160,12 +188,56 @@ class PresenceCEPWorker:
                         break
                     logger.error(f"PresenceCEPWorker: Loop error: {e}", exc_info=True)
                     await asyncio.sleep(2)
+                finally:
+                    if sleep_task is not None and not sleep_task.done():
+                        sleep_task.cancel()
         finally:
             if not stop_task.done():
                 stop_task.cancel()
 
+    async def _sleep_monitor_loop(self, client: aiomqtt.Client, stop_event: asyncio.Event):
+        """Periodically checks for sustained nighttime inactivity to infer sleep onset."""
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=60.0)
+                break
+            except asyncio.TimeoutError:
+                await self._evaluate_sleep_onset(client, time.time())
+
+    async def _evaluate_sleep_onset(self, client: aiomqtt.Client, now: float):
+        """Transitions sleep state to 'asleep' if resident is occupied in room with sustained night inactivity."""
+        if self._sleep_state == "asleep":
+            return
+
+        # Only infer sleep if the resident is not known to have vacated the room
+        room_state = self._last_published_state.get("main") or self._last_published_state.get("bedroom")
+        if room_state == "vacated":
+            return
+
+        current_hour = datetime.now().hour
+        if self.sleep_start_hour > self.sleep_end_hour:
+            is_night_window = current_hour >= self.sleep_start_hour or current_hour < self.sleep_end_hour
+        else:
+            is_night_window = self.sleep_start_hour <= current_hour < self.sleep_end_hour
+
+        if is_night_window and (now - self._last_sleep_activity) >= self.sleep_inactivity_seconds:
+            await self._publish_sleep_state(client, "asleep", self._last_active_user_id, now)
+
+    async def _publish_sleep_state(self, client: aiomqtt.Client, new_state: str, user_id: str, timestamp: float):
+        if self._sleep_state == new_state:
+            return
+        self._sleep_state = new_state
+        synthetic_topic = "max/state/sleep"
+        payload = json.dumps({
+            "state": new_state,
+            "user_id": user_id,
+            "timestamp": timestamp,
+        })
+        await client.publish(synthetic_topic, payload)
+        logger.info(f"PresenceCEPWorker: Published synthetic event -> {synthetic_topic}: {new_state}")
+
     async def _process_raw_sensor(self, client: aiomqtt.Client, message):
-        """Parses incoming MQTT sensor telemetry and evaluates sequence triggers."""
+        """Parses incoming MQTT sensor telemetry and evaluates sequence & wake triggers."""
         try:
             # Supports: home/{room}/sensor/{type} OR home/{room}/sensor/{type}/{name}
             parts = str(message.topic).split("/")
@@ -181,6 +253,15 @@ class PresenceCEPWorker:
             return
 
         now = time.time()
+        user_id = payload.get("user_id", "default_user")
+        self._last_active_user_id = user_id
+
+        # Track active movement/door events for sleep & immediate wake detection
+        normalized_state = str(state).lower()
+        if normalized_state in ("active", "motion", "open"):
+            self._last_sleep_activity = now
+            if self._sleep_state == "asleep":
+                await self._publish_sleep_state(client, "awake", user_id, now)
 
         self._sensor_history.append({
             "room": room,
@@ -188,7 +269,7 @@ class PresenceCEPWorker:
             "name": device_name,
             "state": state,
             "timestamp": now,
-            "user_id": payload.get("user_id", "default_user")
+            "user_id": user_id
         })
 
         # Prune events older than 60 seconds
@@ -213,10 +294,19 @@ class PresenceCEPWorker:
             matched, last_user_id = self._match_sequence(sequence, window_seconds, current_time)
 
             if matched:
+                # Deduplicate repeated triggers for the same room/state
+                if self._last_published_state.get(target_room) == target_state:
+                    self._sensor_history.clear()
+                    break
+
+                self._last_published_state[target_room] = target_state
                 synthetic_topic = f"max/presence/{target_room}"
                 event_payload = json.dumps({
                     "state": target_state,
                     "room": target_room,
+                    "scope": rule.get("scope", "premise"),
+                    "out_location": rule.get("out_location", "out"),
+                    "next_room": rule.get("next_room", "hallway"),
                     "user_id": last_user_id,
                     "timestamp": current_time,
                     "trigger_rule": rule.get("name")

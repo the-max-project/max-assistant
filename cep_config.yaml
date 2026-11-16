@@ -1,11 +1,18 @@
 # Presence Complex Event Processing (CEP) Configuration
 # Defines sequences to infer room presence and transitions.
 
+sleep:
+  inactivity_seconds: 1800   # 30 minutes of no motion/door activity during night window -> asleep
+  start_hour: 22             # 10:00 PM
+  end_hour: 7                # 7:00 AM
+
 rules:
   # Care home resident leaving room: Internal door opens/closes, then hallway motion detected
   - name: "resident_leave_room"
     room: "main"
     target_state: "vacated"
+    scope: "premise"          # Marks user as away/out (not in hallway)
+    out_location: "out"
     window_seconds: 20
     sequence:
       - room: "MAIN"
@@ -20,6 +27,7 @@ rules:
   - name: "resident_enter_room"
     room: "main"
     target_state: "occupied"
+    scope: "premise"
     window_seconds: 30
     sequence:
       - room: "main"
@@ -33,6 +41,7 @@ rules:
   - name: "room_motion_occupied"
     room: "main"
     target_state: "occupied"
+    scope: "premise"
     window_seconds: 5
     sequence:
       - room: "main"

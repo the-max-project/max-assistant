@@ -37,6 +37,7 @@ class MQTTService:
             try:
                 async with aiomqtt.Client(self.broker_host, port=self.broker_port) as client:
                     await client.subscribe("max/presence/#")
+                    await client.subscribe("max/state/#")
                     logger.info("MQTTService: Subscribed to synthetic presence topics.")
                     async for message in client.messages:
                         await self._dispatch(message)
