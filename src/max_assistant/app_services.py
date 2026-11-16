@@ -31,6 +31,7 @@ from max_assistant.services.presence_cep import PresenceCEPWorker
 from max_assistant.services.mqtt_service import MQTTService
 from max_assistant.services.notification_router import NotificationRouter
 from max_assistant.services.event_monitor import EventMonitor
+from max_assistant.services.playbook_service import PlaybookService
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,7 @@ class AppServices:
             event_bus: LocalEventBus,
             event_monitor: EventMonitor,
             time_scheduler: PersistentTimeScheduler,
+            playbook_service: PlaybookService,
             mqtt_service: MQTTService,
             cep_worker: PresenceCEPWorker,
             notification_router: NotificationRouter
@@ -76,6 +78,7 @@ class AppServices:
         self.event_bus = event_bus
         self.event_monitor = event_monitor
         self.time_scheduler = time_scheduler
+        self.playbook_service = playbook_service
         self.mqtt_service = mqtt_service
         self.cep_worker = cep_worker
         self.notification_router = notification_router
@@ -97,6 +100,12 @@ class AppServices:
             event_bus = LocalEventBus()
             event_monitor = EventMonitor(event_bus=event_bus)
             time_scheduler = PersistentTimeScheduler(db_client=db_client, event_bus=event_bus)
+            playbook_service = PlaybookService(
+                db_client=db_client,
+                llm=llm,
+                time_scheduler=time_scheduler,
+                event_bus=event_bus,
+            )
 
             # 3. Initialize and Populate Tool Registry (Injecting time_scheduler into providers)
             tool_registry = cls._initialize_tool_registry(db_client, llm, time_scheduler)
@@ -130,6 +139,7 @@ class AppServices:
                 event_bus=event_bus,
                 event_monitor=event_monitor,
                 time_scheduler=time_scheduler,
+                playbook_service=playbook_service,
                 mqtt_service=mqtt_service,
                 cep_worker=cep_worker,
                 notification_router=notification_router

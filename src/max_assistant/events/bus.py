@@ -14,6 +14,13 @@ TOPIC_CHAT_TURN_COMPLETED = "chat.turn.completed"
 TOPIC_USER_SPEECH_TRANSCRIBED = "user.speech.transcribed"
 TOPIC_AGENT_RESPONSE_GENERATED = "agent.response.generated"
 
+# Daily Playbook & Engagement Lifecycle Topics
+TOPIC_PLAYBOOK_GENERATE = "playbook.generate"
+TOPIC_PLAYBOOK_GENERATED = "playbook.generated"
+TOPIC_PLAYBOOK_ITEM_READY = "playbook.item.ready"
+TOPIC_USER_ENGAGEMENT_IDLE = "user.engagement.idle"
+TOPIC_USER_WOKE_UP = "user.woke_up"
+
 class LocalEventBus:
     """Asynchronous publish-subscribe event bus supporting wildcard routing."""
 

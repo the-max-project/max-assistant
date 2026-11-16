@@ -96,6 +96,7 @@ def test_direct_instantiation_guard_raises_runtime_error():
             event_bus=MagicMock(),
             event_monitor=MagicMock(),
             time_scheduler=MagicMock(),
+            playbook_service=MagicMock(),
             mqtt_service=MagicMock(),
             cep_worker=MagicMock(),
             notification_router=MagicMock(),

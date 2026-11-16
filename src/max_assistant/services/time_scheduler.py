@@ -5,21 +5,26 @@ import heapq
 import time
 from datetime import datetime, timedelta
 import logging
+
 from max_assistant.clients.neo4j_client import Neo4jClientError, Neo4jCircuitBreakerError
+from max_assistant.events.bus import TOPIC_PLAYBOOK_GENERATE
 
 logger = logging.getLogger(__name__)
 
 class PersistentTimeScheduler:
     """Heap-based priority timer that evaluates validity and context before firing."""
 
-    def __init__(self, db_client, event_bus):
+    def __init__(self, db_client, event_bus, playbook_hour: int = 5, playbook_minute: int = 30):
         self.db_client = db_client
         self.event_bus = event_bus
+        self.playbook_hour = playbook_hour
+        self.playbook_minute = playbook_minute
         # Heap item: (due_epoch, task_id, user_id, text, expires_epoch, can_wake_user)
         self._heap = []
         self._wake_event = asyncio.Event()
         self._running = False
         self._loop_task: asyncio.Task | None = None
+        self._cron_task: asyncio.Task | None = None
 
     def wake(self) -> None:
         """Signals the scheduler loop to immediately re-evaluate deferred tasks."""
@@ -33,12 +38,41 @@ class PersistentTimeScheduler:
         self._running = True
         await self._hydrate_from_neo4j()
         self._loop_task = asyncio.create_task(self._run_loop())
+        self._cron_task = asyncio.create_task(self._daily_playbook_cron_loop())
 
     async def stop(self):
         self._running = False
         self._wake_event.set()
         if self._loop_task:
             self._loop_task.cancel()
+        if self._cron_task:
+            self._cron_task.cancel()
+
+    async def _daily_playbook_cron_loop(self):
+        """Fires `playbook.generate` once daily at the configured pre-wake time (default 05:30)."""
+        last_generated_date: str | None = None
+        while self._running:
+            now = datetime.now()
+            target = now.replace(
+                hour=self.playbook_hour,
+                minute=self.playbook_minute,
+                second=0,
+                microsecond=0,
+            )
+            if now >= target:
+                if last_generated_date != now.date().isoformat():
+                    last_generated_date = now.date().isoformat()
+                    await self.event_bus.publish(
+                        TOPIC_PLAYBOOK_GENERATE,
+                        {"date": last_generated_date, "trigger": "daily_cron"},
+                    )
+                target = target + timedelta(days=1)
+
+            sleep_seconds = max(1.0, (target - datetime.now()).total_seconds())
+            try:
+                await asyncio.sleep(sleep_seconds)
+            except asyncio.CancelledError:
+                break
 
     async def _hydrate_from_neo4j(self):
         try:
