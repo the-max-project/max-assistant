@@ -32,6 +32,8 @@ from max_assistant.services.mqtt_service import MQTTService
 from max_assistant.services.notification_router import NotificationRouter
 from max_assistant.services.event_monitor import EventMonitor
 from max_assistant.services.playbook_service import PlaybookService
+from max_assistant.services.engagement_manager import EngagementManager
+from max_assistant.tools.playbook_tools import PlaybookTools
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +62,7 @@ class AppServices:
             event_monitor: EventMonitor,
             time_scheduler: PersistentTimeScheduler,
             playbook_service: PlaybookService,
+            engagement_manager: EngagementManager,
             mqtt_service: MQTTService,
             cep_worker: PresenceCEPWorker,
             notification_router: NotificationRouter
@@ -79,6 +82,7 @@ class AppServices:
         self.event_monitor = event_monitor
         self.time_scheduler = time_scheduler
         self.playbook_service = playbook_service
+        self.engagement_manager = engagement_manager
         self.mqtt_service = mqtt_service
         self.cep_worker = cep_worker
         self.notification_router = notification_router
@@ -108,7 +112,9 @@ class AppServices:
             )
 
             # 3. Initialize and Populate Tool Registry (Injecting time_scheduler into providers)
-            tool_registry = cls._initialize_tool_registry(db_client, llm, time_scheduler)
+            tool_registry = cls._initialize_tool_registry(
+                db_client, llm, time_scheduler, playbook_service
+            )
 
             # 4. Create Reasoning Engine
             reasoning_engine = await create_reasoning_engine(llm, tool_registry)
@@ -126,6 +132,12 @@ class AppServices:
                 db_client=db_client,
                 time_scheduler=time_scheduler
             )
+            engagement_manager = EngagementManager(
+                event_bus=event_bus,
+                session_mgr=session_manager,
+                db_client=db_client,
+                notification_router=notification_router
+            )
 
             # 6. Return the fully configured container instance
             return cls(
@@ -142,7 +154,8 @@ class AppServices:
                 playbook_service=playbook_service,
                 mqtt_service=mqtt_service,
                 cep_worker=cep_worker,
-                notification_router=notification_router
+                notification_router=notification_router,
+                engagement_manager=engagement_manager,
             )
 
         except Exception as e:
@@ -181,16 +194,22 @@ class AppServices:
     def _initialize_tool_registry(
             db_client: Neo4jClient,
             llm: ChatOllama,
-            time_scheduler: PersistentTimeScheduler
+            time_scheduler: PersistentTimeScheduler,
+            playbook_service: PlaybookService
     ) -> ToolRegistry:
-        """Creates the tool registry and registers providers with necessary dependencies."""
         logger.info("Initializing and populating tool registry...")
         tool_registry = ToolRegistry(db_client=db_client, llm=llm)
 
         for provider_class in ALL_TOOL_PROVIDERS:
-            # Special dependency injection for ReminderTools
             if issubclass(provider_class, ReminderTools) or provider_class is ReminderTools:
-                provider_instance = provider_class(db_client=db_client, time_scheduler=time_scheduler, llm=llm)
+                provider_instance = provider_class(
+                    db_client=db_client, time_scheduler=time_scheduler, llm=llm
+                )
+                tool_registry.register_instance(provider_instance)
+            elif issubclass(provider_class, PlaybookTools) or provider_class is PlaybookTools:
+                provider_instance = provider_class(
+                    db_client=db_client, playbook_service=playbook_service, llm=llm
+                )
                 tool_registry.register_instance(provider_instance)
             else:
                 tool_registry.register_provider(provider_class)
