@@ -35,6 +35,8 @@ class PersistentTimeScheduler:
         self._wake_event.set()
 
     async def start(self):
+        if self._running:
+            return
         self._running = True
         await self._hydrate_from_neo4j()
         self._loop_task = asyncio.create_task(self._run_loop())
