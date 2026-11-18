@@ -62,15 +62,12 @@ async def test_sleep_state_awake_delivers_briefing_once(engagement_manager, mock
 
     await engagement_manager.on_sleep_state_change("state.sleep", {"state": "awake", "user_id": "user123"})
 
-    # Verify broadcast
-    mock_agent.connection_manager.submit_external_event.assert_awaited_once_with(
-        {"text": "Good morning! You have Bingo today at 4:00 PM."}
-    )
-
-    # Fire again, verify no second call
-    mock_agent.connection_manager.submit_external_event.reset_mock()
-    await engagement_manager.on_sleep_state_change("state.sleep", {"state": "awake", "user_id": "user123"})
-    mock_agent.connection_manager.submit_external_event.assert_not_called()
+    # Assertion verifies it was wrapped into an LLM directive
+    mock_agent.connection_manager.submit_external_event.assert_awaited_once()
+    call_args = mock_agent.connection_manager.submit_external_event.call_args[0][0]
+    assert call_args["type"] == "WAKE_UP_BRIEFING"
+    assert "PROACTIVE PROMPT DIRECTIVE" in call_args["text"]
+    assert "Good morning! You have Bingo today at 4:00 PM." in call_args["text"]
 
 
 @pytest.mark.asyncio
@@ -153,6 +150,7 @@ async def test_chat_turn_completed_delivers_prompt_after_delay(engagement_manage
 
         mock_agent.connection_manager.submit_external_event.assert_awaited_once()
         call_args = mock_agent.connection_manager.submit_external_event.call_args[0][0]
+        assert call_args["type"] == "PLAYBOOK_PROMPT"
+        assert call_args["item_id"] == "item_xyz"
         assert "John" in call_args["text"]
         assert "Hi Mom!" in call_args["text"]
-        assert "item_xyz" in call_args["text"]

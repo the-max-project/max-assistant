@@ -67,7 +67,7 @@ class TestNotificationRouter:
             # Verify broadcast was called with correct payload
             mock_broadcast.assert_called_once_with(
                 "user123",
-                {"task_id": "task456", "text": "Test task"}
+                {"type": "REMINDER", "task_id": "task456", "text": "Test task"}
             )
 
     @pytest.mark.asyncio
@@ -128,8 +128,9 @@ class TestNotificationRouter:
             mock_broadcast.assert_called_once_with(
                 "user123",
                 {
+                    "type": "REMINDER",
                     "task_id": "task1",
-                    "text": "You just left the bedroom. Reminder: Reminder task"
+                    "text": "The resident just left the bedroom. Gently deliver this reminder: Reminder task"
                 }
             )
 

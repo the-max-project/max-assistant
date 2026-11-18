@@ -1,0 +1,51 @@
+Playbook_E2E_Flow:
+  username: "Margaret.Miller"
+  freeze_time: "2026-11-08 08:00:00"
+  steps:
+    - inject_event:
+        topic: "state.sleep"
+        payload:
+          state: "asleep"
+
+    - advance_time:
+        minutes: 15
+        settle_time: 0.5
+
+    - inject_event:
+        topic: "state.sleep"
+        payload:
+          state: "awake"
+
+    - wait_for_response:
+        timeout: 20
+      validators:
+        - semantic_criteria:
+            - "The assistant gives a warm morning greeting and the haircut is mentioned"
+
+    - advance_time:
+        minutes: 35
+        settle_time: 0.5
+
+    - wait_for_response:
+        timeout: 20
+      validators:
+        - semantic_criteria:
+            - "The assistant reminds you about breakfast"
+
+    # 3. Simulate an engagement prompt from the background CEP/Idle service
+    - inject_event:
+        topic: "user.engagement.idle"
+
+    - wait_for_response:
+        timeout: 30
+      validators:
+        - semantic_criteria:
+            - "The assistant suggests a topic or activity for the user to engage with."
+
+    # 4. Test user opt-in and tool execution side-effects
+    - user_input: "Yes please, that sounds fun."
+      validators:
+        - substrings_present_any:
+            - "set"
+            - "scheduled"
+            - "done"

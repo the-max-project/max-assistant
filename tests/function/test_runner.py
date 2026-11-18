@@ -1,4 +1,5 @@
 import asyncio
+from datetime import timedelta
 import inspect
 import json
 import time
@@ -47,6 +48,7 @@ async def execute_scenario_workflow(
         model_name: str,
         scenario_request=None,
         results: Optional[ScenarioResult] = None,
+        frozen_time = None,
 
 ):
     """
@@ -67,6 +69,7 @@ async def execute_scenario_workflow(
     if scenario_request is not None and hasattr(scenario_request, "node"):
         testcase_name = scenario_request.node.name
         app_services = await AppServices.create(model_name=model_name)
+        await app_services.time_scheduler.start()
     else:
         print("No request or node found, skipping AppServices creation.")
         return
@@ -85,8 +88,17 @@ async def execute_scenario_workflow(
 
         person_tools = PersonTools(app_services.db_client)
         user_data = await person_tools.get_user_info_internal(username)
+        if not isinstance(user_data, dict):
+            raise ValueError(f"Cannot establish user ID for {username!r}: invalid lookup response")
         if "error" in user_data:
-            user_data = {}
+            raise ValueError(
+                f"Cannot establish user ID for {username!r}: "
+                f"{user_data['error']} ({user_data.get('details', 'no details')})"
+            )
+        user_record = user_data.get("user")
+        user_id = user_record.get("id") if isinstance(user_record, dict) else None
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError(f"Cannot establish user ID for {username!r}: missing or invalid ID")
 
         agent = Agent(app_services.reasoning_engine, user_data)
         thread_id = agent.get_thread_id()
@@ -94,10 +106,10 @@ async def execute_scenario_workflow(
         # Wire a spy connection_manager & register with session_manager
         # so NotificationRouter can dispatch pushed events during tests
         mock_conn_mgr = MagicMock()
-        mock_conn_mgr.submit_external_event = AsyncMock()
+        pushed_events = asyncio.Queue()
+        mock_conn_mgr.submit_external_event = AsyncMock(side_effect=pushed_events.put)
         agent.connection_manager = mock_conn_mgr
 
-        user_id = user_data.get("id", username)
         session_manager.register(user_id, agent)  # or session_manager.add_agent(user_id, agent)
 
         # This creates a highly scannable visual header inside PyCharm's console window
@@ -144,6 +156,45 @@ async def execute_scenario_workflow(
 
                 step_label = f"[EVENT INJECT: {topic}]"
 
+            elif "wait_for_response" in step:
+                config = step["wait_for_response"] or {}
+                timeout = config.get("timeout", 30)
+                if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
+                    raise ValueError("wait_for_response timeout must be a positive number")
+                try:
+                    pushed_payload = await asyncio.wait_for(pushed_events.get(), timeout=timeout)
+                except asyncio.TimeoutError as exc:
+                    raise TimeoutError(f"Timed out waiting for a pushed response after {timeout} seconds") from exc
+                actual_response = await agent.handle_push_event(pushed_payload)
+                step_label = "[WAIT FOR RESPONSE]"
+
+            elif "advance_time" in step:
+                if frozen_time is None:
+                    raise ValueError(
+                        f"Step {index} uses 'advance_time', but scenario '{testcase_name}' has no 'freeze_time' configured."
+                    )
+
+                time_cfg = step["advance_time"]
+                if "to" in time_cfg:
+                    frozen_time.move_to(time_cfg["to"])
+                    step_label = f"[ADVANCE TIME -> {time_cfg['to']}]"
+                else:
+                    delta = timedelta(
+                        hours=time_cfg.get("hours", 0),
+                        minutes=time_cfg.get("minutes", 0),
+                        seconds=time_cfg.get("seconds", 0),
+                    )
+                    frozen_time.tick(delta=delta)
+                    step_label = f"[ADVANCE TIME +{delta}]"
+
+                # Interrupt PersistentTimeScheduler's sleep so newly due reminders evaluate immediately
+                if app_services.time_scheduler:
+                    app_services.time_scheduler.wake()
+
+                # Brief yield to let the scheduler loop process the newly due task
+                await asyncio.sleep(time_cfg.get("settle_time", 0.2))
+                actual_response = ""
+
             # --- BRANCH B: Standard User Chat Input ---
             elif "user_input" in step:
                 user_input = step["user_input"]
@@ -153,7 +204,7 @@ async def execute_scenario_workflow(
                 step_label = user_input
             else:
                 raise ValueError(
-                    f"Step {index} in testcase '{testcase_name}' must contain 'user_input' or 'inject_event'."
+                    f"Step {index} in testcase '{testcase_name}' has no recognized action."
                 )
 
             step_duration = time.perf_counter() - start_time
@@ -185,6 +236,9 @@ async def execute_scenario_workflow(
         success = True
 
     finally:
+        if app_services.time_scheduler:
+            await app_services.time_scheduler.stop()
+
         if agent and user_id:
             session_manager.unregister(user_id, agent)
 

@@ -106,6 +106,8 @@ VALIDATOR_REGISTRY = {
     "semantic_criteria": assert_semantic_criteria,
 }
 
+STEP_ACTIONS = ("inject_event", "user_input", "wait_for_response", "advance_time")
+
 
 def build_steps_from_yaml(yaml_steps: list) -> list:
     """
@@ -137,13 +139,11 @@ def build_steps_from_yaml(yaml_steps: list) -> list:
 
             validators.append(validator_instance)
 
-        step_dict = {"validators": validators}
-        if "inject_event" in step:
-            step_dict["inject_event"] = step["inject_event"]
-        elif "user_input" in step:
-            step_dict["user_input"] = step["user_input"]
-        else:
-            raise ValueError(f"Step missing 'user_input' or 'inject_event': {step}")
+        actions = [key for key in step if key != "validators"]
+        if len(actions) != 1 or actions[0] not in STEP_ACTIONS:
+            raise ValueError(f"Step must contain exactly one known action {STEP_ACTIONS}: {step}")
+        action = actions[0]
+        step_dict = {"validators": validators, action: step[action]}
 
         processed_steps.append(step_dict)
 
