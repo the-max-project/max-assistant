@@ -93,34 +93,33 @@ async def create_reasoning_engine(
         """
         logger.info("Node: prepare_input")
 
-        # --- UPDATE: Intercept background reminder push events ---
+        #  Intercept background reminder push events ---
         external_event = state.get("external_event")
         if external_event:
+            event_type = external_event.get("type", "REMINDER")
             reminder_text = external_event.get("text", "")
-            task_id = external_event.get("task_id", "unknown")
-            logger.info(f"prepare_input: Intercepted background event notification for task [{task_id}]")
+            item_id = external_event.get("task_id") or external_event.get("item_id") or "unknown"
+            logger.info(f"prepare_input: Intercepted background event [{event_type}] id=[{item_id}]")
 
-            # Label the input clearly so the model parses it as an event, not a user message
             event_message = HumanMessage(
-                content=f"[BACKGROUND SYSTEM TRIGGER]\nTask Instruction context: {reminder_text}"
+                content=f"[BACKGROUND SYSTEM DIRECTIVE | TYPE: {event_type}]\n{reminder_text}"
             )
 
             return {
                 "messages": [event_message],
                 "external_event": {},
-                "is_background": True  # Set the context flag
+                "is_background": True,
             }
 
         # --- Fallback: Normal conversational turn processing ---
         text = state.get("transcribed_text", "").strip()
         if text:
-            # Returning this appends the new message to history,
-            # and resets transcribed_text to "" so loops don't re-trigger it.
             return {
                 "messages": [HumanMessage(content=text)],
-                "transcribed_text": ""
+                "transcribed_text": "",
+                "is_background": False,
             }
-        return {}
+        return {"is_background": False}
 
     async def call_model(state: GraphState)-> dict[str, Any]:
         """
@@ -140,16 +139,20 @@ async def create_reasoning_engine(
         )
 
         if state.get("is_background"):
-            # This task-centric prompt completely eliminates conversational chitchat and tool loops
             bg_prompt = ChatPromptTemplate.from_messages([
-                ("system", "You are an automated background execution node for the MAX assistant framework.\n"
-                           "User profiles: {user_info}\n"
-                           "Current time context: {current_datetime}\n\n"
-                           "CRITICAL EXECUTION DIRECTIVES:\n"
-                           "1. You are running in an autonomous background system sequence, NOT a live conversation loop.\n"
-                           "2. Review the background task instruction payload. If it is a reminder whose time is up, your single goal is to write a natural announcement informing the user that their task time is reached.\n"
-                           "3. Run tools if required to fulfill a complex request, but DO NOT schedule new reminders recursively.\n"
-                           "4. Formulate your final response as a direct message spoken aloud to the user (e.g., 'Margaret, your reminder to check the oven is up.'). Do not output markdown code blocks, notes, or raw JSON tags."),
+                ("system",
+                 "You are Max, a warm, patient companion speaking proactively to the user.\n"
+                 "User profiles: {user_info}\n"
+                 "Current time context: {current_datetime}\n\n"
+                 "CRITICAL EXECUTION DIRECTIVES:\n"
+                 "1. The latest message is an internal SYSTEM DIRECTIVE instructing you what to say to the user. "
+                 "It is NOT the user speaking to you. Never reply as the user.\n"
+                 "2. Speak directly to the user in 1-2 warm, simple sentences appropriate for dementia care:\n"
+                 "   - REMINDER: Gently announce that their reminder time has arrived.\n"
+                 "   - WAKE_UP_BRIEFING: Deliver a calm morning greeting using the provided summary.\n"
+                 "   - PLAYBOOK_PROMPT: Gently ask the optional activity question or share the family update.\n"
+                 "3. NEVER call tools during a background trigger. If asking a question, ask it and stop—wait for the user's reply on the next turn.\n"
+                 "4. Output ONLY the spoken words for the user. Never read aloud internal IDs, UUIDs, tool names, markdown, or JSON."),
                 MessagesPlaceholder(variable_name="messages")
             ])
             chain = bg_prompt | llm_without_tools
@@ -224,9 +227,11 @@ async def create_reasoning_engine(
 
     def should_continue(state: GraphState) -> Literal["execute_tools", "__end__"]:
         """Conditional node to decide whether to execute tools or end."""
-        last_message = state["messages"][-1]
+        if state.get("is_background"):
+            logger.info("Node: should_continue (background turn) - Return= __end__")
+            return "__end__"
 
-        # Use getattr to safely check for tool_calls since BaseMessage doesn't guarantee it
+        last_message = state["messages"][-1]
         if getattr(last_message, "tool_calls", None):
             logger.info("Node: should_continue - Return= execute_tools")
             return "execute_tools"

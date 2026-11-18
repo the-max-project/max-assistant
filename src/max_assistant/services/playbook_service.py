@@ -409,7 +409,7 @@ class PlaybookService:
                 OPTIONAL MATCH (old_item)-[:SPAWNED_TASK]->(old_task:Task)
                 DETACH \
                 DELETE old_item, old_task
-                WITH p
+                WITH DISTINCT p
 
                 // Insert new trimmed schedule
                 UNWIND $items AS item

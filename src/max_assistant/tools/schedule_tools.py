@@ -119,9 +119,8 @@ class ScheduleTools(BaseToolProvider):
             user_info: Annotated[dict, InjectedState("userinfo")],
         ) -> str:
         """
-        Use this as the DEFAULT tool for any general schedule question,
-        like 'What's my schedule?', 'What's on today?', or 'Am I busy tomorrow?'
-        It combines appointments and daily routines into a single, sorted list.
+        ONLY use this tool if the user specifically asks for their "full schedule",
+        use the tool get_remaining_daily_plans for other schedule-related questions.
         The target_date arg must be a valid iso date string.
         """
         logger.info(f"Tool: get_full_schedule for {target_date}")

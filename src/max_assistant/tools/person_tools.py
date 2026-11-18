@@ -606,6 +606,7 @@ class PersonTools(BaseToolProvider):
 
             validated_user = PersonDetails.model_validate(user_props)
             validated_location = LocationDetails.model_validate(location_props) if location_props else None
+            logger.info("Returning user user: %s and location: %s", validated_user, validated_location)
 
             return {
                 "user": validated_user.model_dump(mode="json"),

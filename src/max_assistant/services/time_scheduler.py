@@ -22,6 +22,7 @@ class PersistentTimeScheduler:
         # Heap item: (due_epoch, task_id, user_id, text, expires_epoch, can_wake_user)
         self._heap = []
         self._wake_event = asyncio.Event()
+        self._cron_wake_event = asyncio.Event()
         self._running = False
         self._loop_task: asyncio.Task | None = None
         self._cron_task: asyncio.Task | None = None
@@ -29,6 +30,7 @@ class PersistentTimeScheduler:
     def wake(self) -> None:
         """Signals the scheduler loop to immediately re-evaluate deferred tasks."""
         self._wake_event.set()
+        self._cron_wake_event.set()
 
     async def schedule(self, task_id: str, user_id: str, text: str, due_epoch: float, expires_epoch: float, can_wake_user: bool):
         heapq.heappush(self._heap, (due_epoch, task_id, user_id, text, expires_epoch, can_wake_user))
@@ -45,6 +47,7 @@ class PersistentTimeScheduler:
     async def stop(self):
         self._running = False
         self._wake_event.set()
+        self._cron_wake_event.set()
         if self._loop_task:
             self._loop_task.cancel()
         if self._cron_task:
@@ -131,12 +134,17 @@ class PersistentTimeScheduler:
 
                 if can_deliver:
                     heapq.heappop(self._heap)
-                    await self._set_task_status(task_id, "COMPLETED")
-                    await self.event_bus.publish("task.due", {
-                        "task_id": task_id,
-                        "user_id": user_id,
-                        "text": text
-                    })
+                    claimed = await self._set_task_status(task_id, "COMPLETED")
+                    if claimed:
+                        await self.event_bus.publish("task.due", {
+                            "task_id": task_id,
+                            "user_id": user_id,
+                            "text": text
+                        })
+                    else:
+                        logger.debug(
+                            f"Task [{task_id}] no longer PENDING in Neo4j (deleted or superseded). Skipping delivery."
+                        )
                 else:
                     # User is away or asleep: leave task in the heap, retry in 30s
                     logger.debug(f"Task [{task_id}] deferred: presence={is_present}, asleep={is_asleep}, can_wake={can_wake}")
@@ -165,6 +173,12 @@ class PersistentTimeScheduler:
         data = res.get("data", [])
         return data[0] if data else {"presence": "present", "sleep_state": "awake"}
 
-    async def _set_task_status(self, task_id: str, status: str):
-        query = "MATCH (t:Task {id: $task_id}) SET t.status = $status RETURN t.id"
-        await self.db_client.execute_query(query, {"task_id": task_id, "status": status})
+    async def _set_task_status(self, task_id: str, status: str) -> bool:
+        # language=Cypher
+        query = """
+        MATCH (t:Task {id: $task_id, status: 'PENDING'})
+        SET t.status = $status
+        RETURN t.id AS id
+        """
+        res = await self.db_client.execute_query(query, {"task_id": task_id, "status": status})
+        return bool(res.get("data"))

@@ -6,6 +6,10 @@ from typing import Optional, Set
 from max_assistant.events.bus import (
     TOPIC_CHAT_TURN_COMPLETED,
     TOPIC_CHAT_TURN_STARTED,
+    TOPIC_TASK_DUE,
+    TOPIC_PRESENCE_ALL,
+    TOPIC_STATE_SLEEP,
+    TOPIC_PRESENCE_ALL
 )
 
 logger = logging.getLogger(__name__)
@@ -22,9 +26,9 @@ class NotificationRouter:
         self._active_users: Set[str] = set()
 
         # Register event handlers
-        self.event_bus.subscribe("task.due", self.on_task_due)
-        self.event_bus.subscribe("presence.*", self.on_presence_change)
-        self.event_bus.subscribe("state.sleep", self.on_sleep_state_change)
+        self.event_bus.subscribe(TOPIC_TASK_DUE, self.on_task_due)
+        self.event_bus.subscribe(TOPIC_PRESENCE_ALL, self.on_presence_change)
+        self.event_bus.subscribe(TOPIC_STATE_SLEEP, self.on_sleep_state_change)
         self.event_bus.subscribe(TOPIC_CHAT_TURN_STARTED, self.on_chat_turn_started)
         self.event_bus.subscribe(TOPIC_CHAT_TURN_COMPLETED, self.on_chat_turn_completed)
 
@@ -52,7 +56,11 @@ class NotificationRouter:
             logger.warning("on_task_due received event without a valid user_id. Discarding.")
             return
 
-        payload = {"task_id": data.get("task_id"), "text": data.get("text")}
+        payload = {
+            "type": "REMINDER",
+            "task_id": data.get("task_id"),
+            "text": data.get("text"),
+        }
         await self._broadcast_to_user(user_id, payload)
 
     async def on_presence_change(self, _topic: str, data: dict):
@@ -121,8 +129,9 @@ class NotificationRouter:
             res = await self.db_client.execute_query(query_tasks, {"user_id": user_id, "room": room})
             for record in res.get("data", []):
                 payload = {
+                    "type": "REMINDER",
                     "task_id": record["id"],
-                    "text": f"You just left the {room}. Reminder: {record['text']}"
+                    "text": f"The resident just left the {room}. Gently deliver this reminder: {record['text']}",
                 }
                 await self._broadcast_to_user(user_id, payload)
 

@@ -94,7 +94,7 @@ class BaseToolProvider:
             validated_nodes = [model_class.model_validate(node) for node in raw_nodes]
             if not validated_nodes:
                 logger.info(f"No valid records found")
-                return "No valid records found."
+                return "[]"
 
             logger.info(f"Successfully validated {len(validated_nodes)} records")
 

@@ -46,7 +46,15 @@ class EngagementManager:
 
             if records and records[0].get("summary"):
                 self._briefing_delivered_today[user_id] = today
-                await self._broadcast(user_id, {"text": records[0]["summary"]})
+                payload = {
+                    "type": "WAKE_UP_BRIEFING",
+                    "text": (
+                        "PROACTIVE PROMPT DIRECTIVE: The resident just woke up. "
+                        "Deliver a calm, warm morning greeting in 2-3 short sentences using this summary. "
+                        f"Do NOT call any tools. Summary: {records[0]['summary']}"
+                    ),
+                }
+                await self._broadcast(user_id, payload)
 
     async def on_chat_turn_completed(self, _topic: str, data: dict):
         """Deliver opportunistic prompts after a user finishes their active chat."""
@@ -66,19 +74,23 @@ class EngagementManager:
 
     async def _evaluate_opportunistic_prompt(self, user_id: str):
         """Pops the highest priority queued engagement item from the Playbook."""
+        logger.info(f"Evaluating opportunistic prompt for user {user_id}")
         today = datetime.now().date().isoformat()
 
         # Check presence and sleep state first
         state_query = """
         MATCH (u:User {id: $user_id})
-        RETURN coalesce(u.presence, 'away') AS presence, coalesce(u.sleep_state, 'awake') AS sleep_state
+        RETURN coalesce(u.presence, 'present') AS presence, coalesce(u.sleep_state, 'awake') AS sleep_state
         """
         state_res = await self.db_client.execute_query(state_query, {"user_id": user_id})
         if not state_res.get("data"):
+            logger.info(f"User {user_id} no presence or sleep_state found, skipping opportunistic prompt")
             return
 
         u_state = state_res["data"][0]
         if u_state["presence"] != "present" or u_state["sleep_state"] != "awake":
+            logger.info(f"User {user_id} has state presence = {u_state['presence']} and sleep_state = "
+                        f"{u_state['sleep_state']}, skipping opportunistic prompt")
             return
 
         # Fetch highest priority queued item
@@ -95,18 +107,38 @@ class EngagementManager:
 
         if records:
             item = records[0]["item"]
-            prompt_text = ""
+            directive = ""
 
             if item["category"] == "OPTIONAL_ACTIVITY":
-                prompt_text = f"I see {item['title']} is coming up. Would you like me to set a reminder for you? Reply using the respond_to_playbook_item tool."
+                directive = (
+                    f"PROACTIVE PROMPT DIRECTIVE: The resident is currently idle. "
+                    f"In 1-2 warm, simple sentences, ask if they would like to attend "
+                    f"'{item['title']}' and if they want a reminder set. "
+                    f"Do NOT call any tools right now—wait for their reply. "
+                    f"[Internal metadata for next turn only—do not say aloud: item_id='{item['id']}']"
+                )
             elif item["category"] == "FAMILY_MESSAGE":
-                prompt_text = f"You received a message from {item['sender']} saying: '{item['summary']}'."
+                directive = (
+                    f"PROACTIVE PROMPT DIRECTIVE: Share this family message warmly "
+                    f"in 1-2 sentences: {item.get('sender', 'Family')} wrote '{item['summary']}'. "
+                    f"Do NOT call any tools."
+                )
             elif item["category"] == "FAMILY_NEWS":
-                prompt_text = f"I have a family update for you: {item['summary']}"
+                directive = (
+                    f"PROACTIVE PROMPT DIRECTIVE: Share this family update warmly "
+                    f"in 1-2 sentences to spark light conversation: '{item['summary']}'. "
+                    f"Do NOT call any tools."
+                )
 
-            # Append the playbook item ID so the LLM knows which item it is referencing if the user replies
-            payload = {"text": f"{prompt_text} (Playbook Item ID: {item['id']})"}
-            await self._broadcast(user_id, payload)
+            if directive:
+                payload = {
+                    "type": "PLAYBOOK_PROMPT",
+                    "item_id": item["id"],
+                    "text": directive,
+                }
+                await self._broadcast(user_id, payload)
+        else:
+            logger.info(f"No playbook item found for user {user_id}, skipping opportunistic prompt")
 
     async def _broadcast(self, user_id: str, payload: dict):
         active_agents = self.session_mgr.get_agents(user_id)

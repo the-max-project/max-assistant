@@ -21,6 +21,11 @@ TOPIC_PLAYBOOK_ITEM_READY = "playbook.item.ready"
 TOPIC_USER_ENGAGEMENT_IDLE = "user.engagement.idle"
 TOPIC_USER_WOKE_UP = "user.woke_up"
 
+# Sensor, State & Scheduler Topics
+TOPIC_TASK_DUE = "task.due"
+TOPIC_PRESENCE_ALL = "presence.*"
+TOPIC_STATE_SLEEP = "state.sleep"
+
 class LocalEventBus:
     """Asynchronous publish-subscribe event bus supporting wildcard routing."""
 

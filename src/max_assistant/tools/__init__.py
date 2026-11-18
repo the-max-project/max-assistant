@@ -1,4 +1,5 @@
 from .person_tools import PersonTools
+from .playbook_tools import PlaybookTools
 from .schedule_tools import ScheduleTools
 from .gmail_tools import GmailTools
 from .general_query_tools import GeneralQueryTools
@@ -12,6 +13,7 @@ ALL_TOOL_PROVIDERS = [
     GmailTools,
     GeneralQueryTools,
     ReminderTools,
+    PlaybookTools
 ]
 
 __all__ = [
@@ -21,4 +23,5 @@ __all__ = [
     "GmailTools",
     "GeneralQueryTools",
     "ReminderTools",
+    "PlaybookTools"
 ]
