@@ -156,9 +156,11 @@ async def create_reasoning_engine(
                 MessagesPlaceholder(variable_name="messages")
             ])
             chain = bg_prompt | llm_without_tools
+            msg_tag = "TASK"
         else:
             # Fall back to standard interactive conversational persona
             chain = senior_assistant_prompt | llm_with_tools
+            msg_tag = "HUMAN"
 
         # Get the last message from trimmed_messages
         last_message = trimmed_messages[-1] if trimmed_messages else None
@@ -167,7 +169,7 @@ async def create_reasoning_engine(
         logger.info("==================== Calling Model: ===================")
         if isinstance(last_message, HumanMessage):
             last_user_prompt = last_message.content
-            logger.info(f"▶▶▶ [Human] [{last_user_prompt}]")
+            logger.info(f"▶▶▶ [{msg_tag}] [{last_user_prompt}]")
         elif isinstance(last_message, ToolMessage):
             last_tool_message = last_message.content
             logger.info(f"▶▶▶ [Tool] [{process_and_summarize(last_tool_message)}]")
