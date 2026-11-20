@@ -48,6 +48,12 @@ MODELS_TO_TEST = [
 SEMANTIC_VALIDATOR_MODEL = os.getenv("SEMANTIC_VALIDATOR_MODEL")
 
 
+def pytest_addoption(parser):
+    group = parser.getgroup("functional diagnostics")
+    group.addoption("--dump-checkpoints", action="store_true", help="Print scenario checkpoint histories")
+    group.addoption("--show-passed-stdout", action="store_true", help="Print captured stdout for passing tests")
+
+
 def verify_neo4j_connectivity(uri: str) -> bool:
     # noinspection PyBroadException
     try:
@@ -224,6 +230,16 @@ def pytest_runtest_makereport(item, call):
     outcome = yield
     report = outcome.get_result()
 
+    if report.when == "call":
+        item._show_stdout_call_passed = report.passed
+    if (item.config.getoption("--show-passed-stdout") and report.when == "teardown"
+            and report.passed and getattr(item, "_show_stdout_call_passed", False)):
+        terminal = item.config.pluginmanager.getplugin("terminalreporter")
+        if terminal:
+            for title, content in report.sections:
+                if title in ("Captured stdout setup", "Captured stdout call", "Captured stdout teardown"):
+                    terminal.write(f"\n--- {item.nodeid}: {title} ---\n{content}")
+
     # We only want to process the data when the main test execution phase finishes
     if report.when == "call":
 
@@ -237,3 +253,6 @@ def pytest_runtest_makereport(item, call):
             # Append the dictionary to the JSONL file safely
             with open(RESULTS_FILE, "a", encoding="utf-8") as f:
                 f.write(json.dumps(results) + "\n")
+
+
+

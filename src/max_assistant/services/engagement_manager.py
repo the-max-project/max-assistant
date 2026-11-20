@@ -2,12 +2,13 @@
 # Licensed under the MIT License. See LICENSE for more details.
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from max_assistant.events.bus import (
     TOPIC_CHAT_TURN_COMPLETED,
     TOPIC_USER_ENGAGEMENT_IDLE
 )
+from max_assistant.services.playbook_service import PlaybookService
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,9 @@ class EngagementManager:
 
     async def on_chat_turn_completed(self, _topic: str, data: dict):
         """Deliver opportunistic prompts after a user finishes their active chat."""
+        if data.get("is_background"):
+            return
+
         user_id = data.get("user_id")
 
         # Slight delay to ensure conversation is truly idle
@@ -75,7 +79,8 @@ class EngagementManager:
     async def _evaluate_opportunistic_prompt(self, user_id: str):
         """Pops the highest priority queued engagement item from the Playbook."""
         logger.info(f"Evaluating opportunistic prompt for user {user_id}")
-        today = datetime.now().date().isoformat()
+        now = datetime.now()
+        today = now.date().isoformat()
 
         # Check presence and sleep state first
         state_query = """
@@ -89,24 +94,52 @@ class EngagementManager:
 
         u_state = state_res["data"][0]
         if u_state["presence"] != "present" or u_state["sleep_state"] != "awake":
-            logger.info(f"User {user_id} has state presence = {u_state['presence']} and sleep_state = "
-                        f"{u_state['sleep_state']}, skipping opportunistic prompt")
+            logger.info(
+                f"User {user_id} has state presence = {u_state['presence']} and sleep_state = "
+                f"{u_state['sleep_state']}, skipping opportunistic prompt"
+            )
             return
 
-        # Fetch highest priority queued item
+        # Fetch candidate queued items ordered by priority
         query = """
         MATCH (u:User {id: $user_id})-[:HAS_PLAYBOOK]->(p:Playbook {date: $date})-[:HAS_ITEM]->(pi:PlaybookItem)
         WHERE pi.status = 'QUEUED' 
           AND pi.category IN ['OPTIONAL_ACTIVITY', 'FAMILY_MESSAGE', 'FAMILY_NEWS']
-        WITH pi ORDER BY pi.priority DESC LIMIT 1
-        SET pi.status = 'PROMPTED', pi.updated_at = datetime()
         RETURN properties(pi) AS item
+        ORDER BY pi.priority DESC, coalesce(pi.event_time, '23:59') ASC
         """
         res = await self.db_client.execute_query(query, {"user_id": user_id, "date": today})
         records = res.get("data", [])
 
-        if records:
-            item = records[0]["item"]
+        selected_item = None
+        expired_ids = []
+
+        for row in records:
+            item = row["item"]
+            if item["category"] == "OPTIONAL_ACTIVITY" and item.get("event_time"):
+                event_dt = PlaybookService._resolve_event_datetime(now.date(), str(item["event_time"]))
+                if event_dt is not None:
+                    lead_minutes = item.get("lead_minutes") if item.get("lead_minutes") is not None else 15
+                    due_dt = event_dt - timedelta(minutes=lead_minutes)
+                    if due_dt <= now:
+                        expired_ids.append(item["id"])
+                        continue
+            selected_item = item
+            break
+
+        if expired_ids:
+            await self.db_client.execute_query(
+                "MATCH (pi:PlaybookItem) WHERE pi.id IN $ids SET pi.status = 'EXPIRED', pi.updated_at = datetime($now)",
+                {"ids": expired_ids, "now": now.isoformat()},
+            )
+
+        if selected_item:
+            await self.db_client.execute_query(
+                "MATCH (pi:PlaybookItem {id: $id}) SET pi.status = 'PROMPTED', pi.updated_at = datetime($now)",
+                {"id": selected_item["id"], "now": now.isoformat()},
+            )
+
+            item = selected_item
             directive = ""
 
             if item["category"] == "OPTIONAL_ACTIVITY":

@@ -167,7 +167,8 @@ async def test_synthesis_parses_wrapped_json_and_defaults(playbook_service, mock
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("response", ["not json", '{"items": [{"category": "INVALID"}]}'])
-async def test_invalid_llm_output_uses_fallback(playbook_service, mock_llm, response):
+@pytest.mark.parametrize("care_cfg, activity_lead", [(CareAdminConfig(), 15), (CareAdminConfig(activity_ask_ahead_minutes=60), 60)])
+async def test_invalid_llm_output_uses_fallback(playbook_service, mock_llm, response, care_cfg, activity_lead):
     mock_llm.ainvoke.return_value.content = response
     context = {"routines": [
         {"title": "Lunch", "time": "12:00"},
@@ -175,9 +176,9 @@ async def test_invalid_llm_output_uses_fallback(playbook_service, mock_llm, resp
         {"title": "Bingo", "rating": "Dislike"},
         {"title": "Music", "room": "Lounge"},
     ]}
-    result = await playbook_service._synthesize_with_llm("u1", "2026-11-17", CareAdminConfig(), context)
+    result = await playbook_service._synthesize_with_llm("u1", "2026-11-17", care_cfg, context)
     assert [(i.title, i.category, i.lead_minutes) for i in result.items] == [
-        ("Lunch", "MEAL", 15), ("Medication", "MEDICATION", 5), ("Music", "OPTIONAL_ACTIVITY", 60),
+        ("Lunch", "MEAL", 15), ("Medication", "MEDICATION", 5), ("Music", "OPTIONAL_ACTIVITY", activity_lead),
     ]
     assert result.items[-1].room == "Lounge"
     assert "Medication at 09:00" in result.morning_summary

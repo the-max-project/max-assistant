@@ -24,6 +24,7 @@ async def test_event_injection_waits_for_agent_response(monkeypatch):
     db.execute_query = AsyncMock(side_effect=[
         {"data": [{"presence": "present", "sleep_state": "awake"}]},
         {"data": [{"item": {"category": "OPTIONAL_ACTIVITY", "title": "gardening", "id": "item-1"}}]},
+        {"data": []},
     ])
     services = SimpleNamespace(event_bus=bus, db_client=db, reasoning_engine=object(),
                                llm_ready_event=asyncio.Event(), time_scheduler=_mock_scheduler())
@@ -44,12 +45,15 @@ async def test_event_injection_waits_for_agent_response(monkeypatch):
     ])
     results = {}
     await test_runner.execute_scenario_workflow(
-        "user", steps, "model", SimpleNamespace(node=SimpleNamespace(name="scenario")), results)
+        "user", steps, "model", SimpleNamespace(node=SimpleNamespace(name="scenario"),
+                                                config=SimpleNamespace(getoption=MagicMock(return_value=False))), results)
 
     payload = agent.handle_push_event.await_args.args[0]
     assert "gardening" in payload["text"]
     assert "item-1" in payload["text"]
     assert db.execute_query.await_args_list[0].args[1] == {"user_id": "user-1"}
+    assert "PROMPTED" in db.execute_query.await_args_list[2].args[0]
+    assert db.execute_query.await_args_list[2].args[1]["id"] == "item-1"
     test_runner.session_manager.register.assert_called_once_with("user-1", agent)
     test_runner.session_manager.unregister.assert_called_once_with("user-1", agent)
     assert results["step_results"][-1]["actual_result"] == "Let's talk about gardening"
@@ -77,7 +81,10 @@ async def test_wait_for_response_times_out(monkeypatch):
     steps = build_steps_from_yaml([{"wait_for_response": {"timeout": 0.01}}])
     with pytest.raises(TimeoutError, match="response"):
         await test_runner.execute_scenario_workflow(
-            "user", steps, "model", SimpleNamespace(node=SimpleNamespace(name="scenario")))
+            "user", steps, "model", SimpleNamespace(node=SimpleNamespace(name="scenario"),
+                                                    config=SimpleNamespace(getoption=MagicMock(return_value=False))))
+    services.time_scheduler.stop.assert_awaited_once()
+    db.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
