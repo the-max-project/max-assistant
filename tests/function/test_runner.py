@@ -9,11 +9,13 @@ from urllib import request
 
 from unittest.mock import AsyncMock, MagicMock
 
+from langchain_neo4j.checkpoint.aio import AsyncNeo4jSaver
 from max_assistant.app_services import AppServices
 from max_assistant.agent.session_mgr import session_manager
 from max_assistant.agent.agent import Agent
 from max_assistant.config import OLLAMA_BASE_URL
 from max_assistant.tools import PersonTools
+from max_assistant.utils.checkpoints import async_dump_thread_transcript
 from tests.function.types import ScenarioResult, StepResult
 from tests.function.conftest import SEMANTIC_VALIDATOR_MODEL
 
@@ -124,7 +126,7 @@ async def execute_scenario_workflow(
 
         for index, step in enumerate(steps, start=1):
             validators = step.get("validators", [])
-            start_time = time.perf_counter()
+            start_time = time.clock_gettime(time.CLOCK_MONOTONIC)
 
             # --- BRANCH A: Direct Event Bus Injection ---
             if "inject_event" in step:
@@ -207,7 +209,7 @@ async def execute_scenario_workflow(
                     f"Step {index} in testcase '{testcase_name}' has no recognized action."
                 )
 
-            step_duration = time.perf_counter() - start_time
+            step_duration = time.clock_gettime(time.CLOCK_MONOTONIC) - start_time
             execution_times.append(step_duration)
 
             if isinstance(actual_response, str):
@@ -241,6 +243,13 @@ async def execute_scenario_workflow(
 
         if agent and user_id:
             session_manager.unregister(user_id, agent)
+
+        if thread_id and app_services.db_client and scenario_request.config.getoption("--dump-checkpoints"):
+            try:
+                saver = AsyncNeo4jSaver(driver=app_services.db_client.driver)
+                await async_dump_thread_transcript(saver, thread_id, latest_only=True)
+            except Exception as exc:
+                print(f"[CHECKPOINT WARN] Failed to dump thread {thread_id}: {exc}")
 
         # Guarantee safe database connection pooling teardown
         if app_services.db_client:

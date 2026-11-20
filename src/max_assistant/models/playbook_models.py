@@ -32,7 +32,7 @@ class CareAdminConfig(BaseNeo4jModel):
     appointment_lead_minutes: int = 45
     departure_lead_minutes: int = 15
     meal_lead_minutes: int = 15
-    activity_ask_ahead_minutes: int = 60
+    activity_ask_ahead_minutes: int = 15
     max_items_per_turn: int = 2
     prompt_cooldown_minutes: int = 20
     wakeup_briefing_hour_start: int = 5

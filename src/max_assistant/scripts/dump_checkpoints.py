@@ -7,11 +7,9 @@ Uses the LangGraph Neo4jSaver object model natively to unpack threads and messag
 import os
 import sys
 import argparse
-import textwrap
-
-from langchain_core.runnables import RunnableConfig
 from neo4j import GraphDatabase
 from langchain_neo4j.checkpoint import Neo4jSaver
+from max_assistant.utils.checkpoints import dump_thread_transcript
 
 # Safeguard check guardrail
 if Neo4jSaver is None:
@@ -69,67 +67,6 @@ def list_active_threads():
     print("------------------------------------  ----------")
     for thread_id, created_at in threads:
         print(f"{thread_id}  {created_at}")
-
-
-def dump_thread_transcript(saver: Neo4jSaver, thread_id: str):
-    """Dumps sequential conversational transcripts by traversing the framework's state checkpoints."""
-    print("\n" + "=" * 80)
-    print(f"{f'TRANSCRIPT FOR THREAD: {thread_id}':^80}")
-    print("=" * 80 + "\n")
-
-    target_config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
-
-    # Fetch all historical timeline transitions associated with this thread scope
-    history = list(saver.list(target_config))
-
-    if not history:
-        print(f"  [!] No active checkpoints found matching thread ID: {thread_id}")
-        return
-
-    # Reverse the collection array to trace the conversation sequentially (Oldest -> Newest)
-    history.reverse()
-
-    print(f"Total Checkpoints Found: {len(history)}\n")
-
-    for idx, cp_tuple in enumerate(history, 1):
-        cp_id = cp_tuple.config.get("configurable", {}).get("checkpoint_id")
-        metadata = cp_tuple.metadata or {}
-
-        print(f" [{idx}] Checkpoint ID : {cp_id}")
-        print(f"     Graph Workflow: Source={metadata.get('source')} | Step={metadata.get('step')}")
-        print("     Messages Transcript:")
-
-        # The framework's tuple automatically manages binary decoding (JSON/MsgPack) under the hood
-        checkpoint_dict = cp_tuple.checkpoint
-        channel_values = checkpoint_dict.get("channel_values", {})
-
-        # Intercept the specific text-oriented state channel array directly
-        messages = channel_values.get("messages", [])
-
-        if messages:
-            for msg in messages:
-                raw_msg  = getattr(msg, "type", type(msg).__name__.lower())
-                if isinstance(raw_msg, (bytes, bytearray)):
-                    msg_type = raw_msg.decode("utf8", errors="replace")
-                else:
-                    msg_type = str(raw_msg)
-
-                if "human" in msg_type:
-                    label = "[HUMAN]"
-                elif "ai" in msg_type:
-                    label = "[AI]"
-                elif "tool" in msg_type:
-                    label = "[TOOL]"
-                else:
-                    label = f"[{msg_type.upper()}]"
-
-                content = getattr(msg, "content", str(msg))
-                prefix = f"         {label:<9}: "
-                indented_content = textwrap.indent(content, " " * len(prefix))[len(prefix):]
-                print(f"{prefix}{indented_content}")
-        else:
-            print("         (No active message frames in this state channel step)")
-        print("-" * 80)
 
 
 def main():
