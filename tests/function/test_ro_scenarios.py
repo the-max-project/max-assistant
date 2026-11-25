@@ -17,6 +17,6 @@ async def test_execute_yaml_workflow(dynamic_scenario_data, model_name, request)
         username=dynamic_scenario_data["username"],
         steps=dynamic_scenario_data["steps"],
         model_name=model_name,
-        request=request,
+        scenario_request=request,
         results=results,
     )

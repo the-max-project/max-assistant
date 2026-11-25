@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 TESTS_DIR = Path(__file__).parent.resolve()
 WORKSPACE_ROOT = TESTS_DIR.parent
 SCENARIOS_DIR = TESTS_DIR / 'ro_scenarios'
+PLAYBOOK_SCENARIOS_DIR = TESTS_DIR / 'playbook_scenarios'
 
 # set up filename to record results
 RESULTS_DIR = TESTS_DIR / 'results'
@@ -45,6 +46,12 @@ MODELS_TO_TEST = [
 ]
 
 SEMANTIC_VALIDATOR_MODEL = os.getenv("SEMANTIC_VALIDATOR_MODEL")
+
+
+def pytest_addoption(parser):
+    group = parser.getgroup("functional diagnostics")
+    group.addoption("--dump-checkpoints", action="store_true", help="Print scenario checkpoint histories")
+    group.addoption("--show-passed-stdout", action="store_true", help="Print captured stdout for passing tests")
 
 
 def verify_neo4j_connectivity(uri: str) -> bool:
@@ -171,19 +178,9 @@ def cleanup_ollama_models_at_session_end():
 
 def pytest_generate_tests(metafunc):
     """
-        This pytest hook performs the following steps:
-        - Discovery: It scans the tests/function/ro_scenarios/ directory for all .yaml and .yml files.
-        - Ordering: It explicitly sorts these files alphabetically to ensure a consistent execution order.
-        - Data Extraction: It opens each YAML file and iterates through the scenarios defined inside.
-        - Processing: For each model: runs all scenarios for that model.
-                For each scenario, it:
-                - Extracts the username.
-                - Processes the steps using a build_steps_from_yaml utility.
-                - Creates a scenario_payload.
-        - Injection: It uses metafunc.parametrize("dynamic_scenario_data", argvalues, ids=ids) to inject this data into
-                 any test function that requests the dynamic_scenario_data fixture.
+    Scans mapped scenario directories for YAML files, parses them,
+    and injects them into tests requesting the mapped fixture.
     """
-    # This will print out exactly what pytest considers the file/test targets
     print(f"\nDEBUG: Pytest targets: {metafunc.config.args}")
     print(f"\nDEBUG: Full option dict: {metafunc.config.option}")
 
@@ -191,30 +188,40 @@ def pytest_generate_tests(metafunc):
     if "model_name" in metafunc.fixturenames:
         metafunc.parametrize("model_name", MODELS_TO_TEST)
 
-    # 2. Parametrize YAML Scenarios
-    if "dynamic_scenario_data" in metafunc.fixturenames:
-        # Fetch files and sort them alphabetically
-        raw_files = list(SCENARIOS_DIR.glob("*.yaml")) + list(SCENARIOS_DIR.glob("*.yml"))
-        yaml_files = sorted(raw_files, key=lambda p: p.name)  # <--- ENFORCES ALPHABETICAL ORDER
+    # 2. Map fixture names to their respective scenario directories
+    scenario_mappings = {
+        "dynamic_scenario_data": SCENARIOS_DIR,
+        "playbook_scenario_data": PLAYBOOK_SCENARIOS_DIR
+    }
 
-        argvalues = []
-        ids = []
+    # 3. Parametrize YAML Scenarios dynamically based on the requested fixture
+    for fixture_name, target_dir in scenario_mappings.items():
+        if fixture_name in metafunc.fixturenames:
+            # Ensure directory exists so glob doesn't fail
+            if not target_dir.exists():
+                target_dir.mkdir(parents=True, exist_ok=True)
 
-        for file_path in yaml_files:
-            with open(file_path, "r") as f:
-                raw_data = yaml.safe_load(f) or {}
+            raw_files = list(target_dir.glob("*.yaml")) + list(target_dir.glob("*.yml"))
+            yaml_files = sorted(raw_files, key=lambda p: p.name)
 
-            # Loops through keys exactly in the order they appear inside the YAML file
-            for scenario_key, data in raw_data.items():
-                processed_steps = build_steps_from_yaml(data["steps"])
-                scenario_payload = {
-                    "username": data["username"],
-                    "steps": processed_steps
-                }
-                argvalues.append(scenario_payload)
-                ids.append(f"{file_path.stem}-{scenario_key}")
+            argvalues = []
+            ids = []
 
-        metafunc.parametrize("dynamic_scenario_data", argvalues, ids=ids)
+            for file_path in yaml_files:
+                with open(file_path, "r") as f:
+                    raw_data = yaml.safe_load(f) or {}
+
+                for scenario_key, data in raw_data.items():
+                    processed_steps = build_steps_from_yaml(data["steps"])
+                    scenario_payload = {
+                        "username": data["username"],
+                        "steps": processed_steps,
+                        "freeze_time": data.get("freeze_time"),
+                    }
+                    argvalues.append(scenario_payload)
+                    ids.append(f"{file_path.stem}-{scenario_key}")
+
+            metafunc.parametrize(fixture_name, argvalues, ids=ids)
 
 
 # noinspection PyUnusedLocal
@@ -222,6 +229,16 @@ def pytest_generate_tests(metafunc):
 def pytest_runtest_makereport(item, call):
     outcome = yield
     report = outcome.get_result()
+
+    if report.when == "call":
+        item._show_stdout_call_passed = report.passed
+    if (item.config.getoption("--show-passed-stdout") and report.when == "teardown"
+            and report.passed and getattr(item, "_show_stdout_call_passed", False)):
+        terminal = item.config.pluginmanager.getplugin("terminalreporter")
+        if terminal:
+            for title, content in report.sections:
+                if title in ("Captured stdout setup", "Captured stdout call", "Captured stdout teardown"):
+                    terminal.write(f"\n--- {item.nodeid}: {title} ---\n{content}")
 
     # We only want to process the data when the main test execution phase finishes
     if report.when == "call":
@@ -236,3 +253,6 @@ def pytest_runtest_makereport(item, call):
             # Append the dictionary to the JSONL file safely
             with open(RESULTS_FILE, "a", encoding="utf-8") as f:
                 f.write(json.dumps(results) + "\n")
+
+
+

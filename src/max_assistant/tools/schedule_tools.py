@@ -6,30 +6,43 @@ Defines Pydantic models for the schedule-related tools and neo4j nodes
 import json
 import asyncio
 import logging
-from typing import Annotated
+from typing import Annotated, Optional
 
 from langchain_ollama import ChatOllama
 from langchain_core.tools import StructuredTool
 from langgraph.prebuilt import InjectedState
 
 from max_assistant.clients.neo4j_client import Neo4jClient
+from max_assistant.events.bus import LocalEventBus, TOPIC_SCHEDULE_UPDATED
 from max_assistant.models.schedule_models import (
     Appointment,
     DailyRoutine,
 )
 from max_assistant.tools.base_provider import BaseToolProvider
 
-
 logger = logging.getLogger(__name__)
 
 
 class ScheduleTools(BaseToolProvider):
-    def __init__(self, db_client: Neo4jClient, llm: ChatOllama = None):
+    def __init__(
+            self,
+            db_client: Neo4jClient,
+            llm: ChatOllama | None = None,
+            event_bus: Optional[LocalEventBus] = None,
+    ):
         """
-        Initializes the toolset with a specific Neo4j client.
+        Initializes the toolset with a specific Neo4j client and optional event bus.
         """
         super().__init__(db_client, llm)
-        logger.debug("PersonTools initialized with a Neo4j client.")
+        self.event_bus = event_bus
+        logger.debug("ScheduleTools initialized with a Neo4j client.")
+
+    async def _notify_schedule_updated(self, user_id: str, target_date: Optional[str] = None) -> None:
+        if self.event_bus is not None:
+            payload = {"user_id": user_id}
+            if target_date:
+                payload["date"] = str(target_date)
+            await self.event_bus.publish(TOPIC_SCHEDULE_UPDATED, payload)
 
     async def get_appointments_for_date(
             self,
@@ -46,7 +59,6 @@ class ScheduleTools(BaseToolProvider):
 
         user_id = self._get_verified_user_id(user_info)
 
-
         query = """
                 WITH datetime($targetDate) AS dt
                 MATCH (u:User {id: $user_id})
@@ -62,7 +74,6 @@ class ScheduleTools(BaseToolProvider):
             "user_id": user_id,
         }
 
-        # Call the same helper with a different model and key
         return await self._query_and_validate_nodes(
             query=query,
             model_class=Appointment,
@@ -70,12 +81,11 @@ class ScheduleTools(BaseToolProvider):
             params=params,
         )
 
-
     async def get_routines_for_date(
             self,
             target_date: str,
             user_info: Annotated[dict, InjectedState("userinfo")]
-        ) -> str:
+    ) -> str:
         """
         Use this tool if the user asks specifically for 'activities', 'daily routines',
         'meal times', or 'medication times'. For general schedule
@@ -105,7 +115,6 @@ class ScheduleTools(BaseToolProvider):
             "user_id": user_id,
         }
 
-        # Call the helper
         return await self._query_and_validate_nodes(
             query=query,
             model_class=DailyRoutine,
@@ -117,17 +126,15 @@ class ScheduleTools(BaseToolProvider):
             self,
             target_date: str,
             user_info: Annotated[dict, InjectedState("userinfo")],
-        ) -> str:
+    ) -> str:
         """
-        Use this as the DEFAULT tool for any general schedule question,
-        like 'What's my schedule?', 'What's on today?', or 'Am I busy tomorrow?'
-        It combines appointments and daily routines into a single, sorted list.
+        ONLY use this tool if the user specifically asks for their "full schedule",
+        use the tool get_remaining_daily_plans for other schedule-related questions.
         The target_date arg must be a valid iso date string.
         """
         logger.info(f"Tool: get_full_schedule for {target_date}")
 
         try:
-            # Run both tools concurrently, passing the same args object downstream
             results = await asyncio.gather(
                 self.get_appointments_for_date(target_date, user_info),
                 self.get_routines_for_date(target_date, user_info)
@@ -135,11 +142,9 @@ class ScheduleTools(BaseToolProvider):
 
             appts_json_str, routines_json_str = results
 
-            # Parse the JSON results from both tools
             appts = json.loads(appts_json_str)
             routines = json.loads(routines_json_str)
 
-            # Check if either tool returned an error
             if isinstance(appts, dict) and 'error' in appts:
                 logger.error(f"Error from get_appointments: {appts}")
                 return json.dumps(appts)
@@ -150,13 +155,10 @@ class ScheduleTools(BaseToolProvider):
             appts_list = appts if isinstance(appts, list) else []
             routines_list = routines if isinstance(routines, list) else []
 
-            # Combine the two lists
             combined_list = []
             for item in appts_list + routines_list:
                 combined_list.append({key: item.get(key) for key in ['time', 'title', 'duration', 'details']})
 
-            # Sort the combined list by 'time'
-            # We use .get() with a default to prevent errors if a key is missing
             sorted_list = sorted(
                 combined_list,
                 key=lambda x: x.get('time', '23:59:59')
@@ -166,7 +168,6 @@ class ScheduleTools(BaseToolProvider):
             return json.dumps(sorted_list, indent=2)
 
         except Exception as e:
-            # Catch-all for any other errors (like JSON parsing)
             error_type = e.__class__.__name__
             logger.error(f"Unexpected error in get_full_schedule: {e}", exc_info=True)
             return json.dumps({"error": f"Internal error combining schedule: {error_type}"})
@@ -199,15 +200,15 @@ class ScheduleTools(BaseToolProvider):
         query = """
             // 1. Fetch the User node first to anchor the transaction
             MATCH (u:User {id: $user_id})
-            
+
             // 2. Instantiate your date variable cleanly as 'd' so it matches downstream properties
             WITH u, date($date) AS d
-            
+
             // 3. MERGE the entire time tree branch securely relative to this specific User
             MERGE (u)-[:HAS_YEAR]->(y:Year {year: d.year})
             MERGE (y)-[:HAS_MONTH]->(m:Month {month: d.month, name: format(d, 'MMM'), year: d.year})
             MERGE (m)-[:HAS_DAY]->(day:Day {day: d.day, month: d.month, year: d.year})
-            
+
             // 4. Create the new Appointment node inside the active transaction scope
             CREATE (a:Appointment {
                 id: randomUUID(),
@@ -217,12 +218,20 @@ class ScheduleTools(BaseToolProvider):
                 details: $details,
                 duration: $duration
             })
-            
+
             // 5. Securely link the unique timeline leaf node to the new appointment record
             MERGE (day)-[:HAS_APPOINTMENT]->(a)
                 """
 
-        return await self._safe_execute_query(query, params)
+        result_str = await self._safe_execute_query(query, params)
+        try:
+            parsed = json.loads(result_str)
+            if not (isinstance(parsed, dict) and "error" in parsed):
+                await self._notify_schedule_updated(user_id=user_id, target_date=date)
+        except json.JSONDecodeError:
+            pass
+
+        return result_str
 
     async def get_activities_info(self, user_info: Annotated[dict, InjectedState("userinfo")]) -> str:
         """

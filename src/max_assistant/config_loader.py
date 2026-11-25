@@ -38,11 +38,7 @@ def load_ollama_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
         logger.info(f"No config file found at {config_path}, using defaults")
         return {}
     
-    # If no config file exists, return empty dict to use defaults
-    if not config_path.exists():
-        logger.info("No ollama_config.yaml found, using defaults")
-        return {}
-        
+
     try:
         with open(config_path, 'r') as file:
             config = yaml.safe_load(file) or {}

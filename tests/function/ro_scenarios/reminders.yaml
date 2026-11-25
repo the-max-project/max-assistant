@@ -1,0 +1,12 @@
+Direct_Reminder_Injection:
+  username: "Margaret.Miller"
+  steps:
+    - inject_event:
+        topic: "task.due"
+        payload:
+          task_id: "test-task-001"
+          text: "Take your afternoon blood pressure medication"
+      validators:
+        - substrings_present_all:
+            - "blood pressure"
+            - "medication"

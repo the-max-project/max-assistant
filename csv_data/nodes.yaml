@@ -20,6 +20,9 @@
   query: |
     UNWIND $data AS row
     MERGE (p:Person:User {id: toString(row.id)})
+    ON CREATE SET 
+        p.presence = 'present',
+        p.sleep_state = 'awake'
     SET p.firstName = row.firstName, 
         p.lastName = row.lastName, 
         p.userName = row.userName,

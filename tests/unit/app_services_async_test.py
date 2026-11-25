@@ -35,6 +35,9 @@ def test_initialize_tool_registry_registers_providers():
     db_client = MagicMock()
     llm = MagicMock()
     fake_registry = MagicMock()
+    fake_time_scheduler = MagicMock()
+    fake_playbook_service = MagicMock()
+    fake_event_bus = MagicMock()
 
     # Create dummy classes with __name__ attributes to satisfy the logger engine
     class MockProvider1: pass
@@ -43,7 +46,14 @@ def test_initialize_tool_registry_registers_providers():
 
     with patch("max_assistant.app_services.ToolRegistry", return_value=fake_registry), \
             patch("max_assistant.app_services.ALL_TOOL_PROVIDERS", [MockProvider1, MockProvider2]):
-        result = AppServices._initialize_tool_registry(db_client, llm)
+        # Pass the fourth argument here
+        result = AppServices._initialize_tool_registry(
+            db_client,
+            llm,
+            fake_time_scheduler,
+            fake_playbook_service,
+            fake_event_bus,
+        )
 
     assert result is fake_registry
     # Confirms that register_provider was invoked for each provider in the tool array
@@ -91,7 +101,15 @@ def test_direct_instantiation_guard_raises_runtime_error():
             tool_registry=MagicMock(),
             reasoning_engine=MagicMock(),
             llm_ready_event=MagicMock(),
-            preload_task=MagicMock()
+            preload_task=MagicMock(),
+            event_bus=MagicMock(),
+            event_monitor=MagicMock(),
+            time_scheduler=MagicMock(),
+            playbook_service=MagicMock(),
+            engagement_manager=MagicMock(),
+            mqtt_service=MagicMock(),
+            cep_worker=MagicMock(),
+            notification_router=MagicMock(),
         )
 
     assert "Use AppServices.create() to instantiate this class." in str(exc_info.value)

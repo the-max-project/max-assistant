@@ -1,0 +1,84 @@
+Playbook_Opt_In_Survives_Schedule_Query:
+  username: "Margaret.Miller"
+  freeze_time: "2026-11-08 08:00:00"
+  steps:
+    - inject_event:
+        topic: "state.sleep"
+        payload:
+          state: "asleep"
+      validators: []
+
+    - advance_time:
+        minutes: 15
+        settle_time: 0.5
+      validators: []
+
+    # 1. Resident wakes up at 08:15 -> receives morning briefing mentioning Haircut at 2:00 PM
+    - inject_event:
+        topic: "state.sleep"
+        payload:
+          state: "awake"
+      validators: []
+
+    - wait_for_response:
+        timeout: 30
+      validators:
+        - semantic_criteria:
+            - "The assistant delivers a warm morning greeting and mentions the haircut."
+
+    # 2. Idle at 08:30 (before 09:45 cutoff for 10:00 AM Chapel Service) -> prompts Chapel Service
+    - advance_time:
+        to: "2026-11-08 08:30:00"
+        settle_time: 0.5
+      validators: []
+
+    - inject_event:
+        topic: "user.engagement.idle"
+      validators: []
+
+    - wait_for_response:
+        timeout: 30
+      validators:
+        - semantic_criteria:
+            - "The assistant asks if the resident would like to attend Chapel Service."
+
+    # 3. Resident accepts -> PlaybookItem marked ACCEPTED and 09:45 REMINDER Task scheduled
+    - user_input: "Yes please, remind me about that."
+      validators:
+        - substrings_present_any:
+            - "set"
+            - "scheduled"
+            - "reminder"
+        - neo4j_node_exists:
+            label: "PlaybookItem"
+            properties:
+              title: "Chapel Service"
+              status: "ACCEPTED"
+        - neo4j_node_exists:
+            label: "Task"
+            properties:
+              source: "PLAYBOOK"
+              type: "REMINDER"
+              status: "PENDING"
+
+    # 4. Resident checks remaining plans at 09:20 -> must NOT wipe ACCEPTED status or spawned Task
+    - advance_time:
+        to: "2026-11-08 09:20:00"
+        settle_time: 0.5
+      validators: []
+
+    - user_input: "What are my plans for the rest of today?"
+      validators:
+        - semantic_criteria:
+            - "The assistant summarizes the remaining events for the day, including Chapel Service and Haircut."
+        - neo4j_node_exists:
+            label: "PlaybookItem"
+            properties:
+              title: "Chapel Service"
+              status: "ACCEPTED"
+        - neo4j_node_exists:
+            label: "Task"
+            properties:
+              source: "PLAYBOOK"
+              type: "REMINDER"
+              status: "PENDING"

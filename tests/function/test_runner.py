@@ -1,4 +1,5 @@
 import asyncio
+from datetime import timedelta
 import inspect
 import json
 import time
@@ -6,10 +7,15 @@ import unicodedata
 from typing import List, Dict, Any, Optional
 from urllib import request
 
+from unittest.mock import AsyncMock, MagicMock
+
+from langchain_neo4j.checkpoint.aio import AsyncNeo4jSaver
 from max_assistant.app_services import AppServices
+from max_assistant.agent.session_mgr import session_manager
 from max_assistant.agent.agent import Agent
 from max_assistant.config import OLLAMA_BASE_URL
 from max_assistant.tools import PersonTools
+from max_assistant.utils.checkpoints import async_dump_thread_transcript
 from tests.function.types import ScenarioResult, StepResult
 from tests.function.conftest import SEMANTIC_VALIDATOR_MODEL
 
@@ -42,8 +48,9 @@ async def execute_scenario_workflow(
         username: str,
         steps: List[Dict[str, Any]],
         model_name: str,
-        request=None,
+        scenario_request=None,
         results: Optional[ScenarioResult] = None,
+        frozen_time = None,
 
 ):
     """
@@ -52,23 +59,30 @@ async def execute_scenario_workflow(
     """
     global _ACTIVE_MODEL
 
+    previous_model = _ACTIVE_MODEL
+
     # Evict the prior model when the model changes across scenario runs
-    if _ACTIVE_MODEL is not None and _ACTIVE_MODEL != model_name:
-        print(f"\n[MODEL ROTATION] Switching from '{_ACTIVE_MODEL}' to '{model_name}'. Unloading previous model...")
-        await unload_ollama_model(_ACTIVE_MODEL)
+    if previous_model is not None and _ACTIVE_MODEL != model_name:
+        print(f"\n[MODEL ROTATION] Switching from '{previous_model}' to '{model_name}'. Unloading previous model...")
+        await unload_ollama_model(previous_model)
 
     _ACTIVE_MODEL = model_name
 
-    testcase_name = "Unknown_Test_Case"
-    if request is not None and hasattr(request, "node"):
-        testcase_name = request.node.name
-
+    if scenario_request is not None and hasattr(scenario_request, "node"):
+        testcase_name = scenario_request.node.name
         app_services = await AppServices.create(model_name=model_name)
+        await app_services.time_scheduler.start()
+    else:
+        print("No request or node found, skipping AppServices creation.")
+        return
+
     execution_times: List[float ] = []
     responses: List[str] = []
     success = False
     thread_id = None
     step_results: List[StepResult] = []
+    agent = None
+    user_id = None
 
     try:
         if not app_services.llm_ready_event.is_set():
@@ -76,11 +90,29 @@ async def execute_scenario_workflow(
 
         person_tools = PersonTools(app_services.db_client)
         user_data = await person_tools.get_user_info_internal(username)
+        if not isinstance(user_data, dict):
+            raise ValueError(f"Cannot establish user ID for {username!r}: invalid lookup response")
         if "error" in user_data:
-            user_data = {}
+            raise ValueError(
+                f"Cannot establish user ID for {username!r}: "
+                f"{user_data['error']} ({user_data.get('details', 'no details')})"
+            )
+        user_record = user_data.get("user")
+        user_id = user_record.get("id") if isinstance(user_record, dict) else None
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError(f"Cannot establish user ID for {username!r}: missing or invalid ID")
 
         agent = Agent(app_services.reasoning_engine, user_data)
         thread_id = agent.get_thread_id()
+
+        # Wire a spy connection_manager & register with session_manager
+        # so NotificationRouter can dispatch pushed events during tests
+        mock_conn_mgr = MagicMock()
+        pushed_events = asyncio.Queue()
+        mock_conn_mgr.submit_external_event = AsyncMock(side_effect=pushed_events.put)
+        agent.connection_manager = mock_conn_mgr
+
+        session_manager.register(user_id, agent)  # or session_manager.add_agent(user_id, agent)
 
         # This creates a highly scannable visual header inside PyCharm's console window
         print("\n" + "=" * 80)
@@ -93,53 +125,112 @@ async def execute_scenario_workflow(
     # Execute conversational array step-by-step
 
         for index, step in enumerate(steps, start=1):
-
-            if "user_input" not in step:
-                raise ValueError(f"Step {index} in testcase '{testcase_name}' is missing required 'user_input' key.")
-
-            user_input = step["user_input"]
             validators = step.get("validators", [])
+            start_time = time.clock_gettime(time.CLOCK_MONOTONIC)
 
-            # Uniform normalization of user input to match LLM standards
-            if isinstance(user_input, str):
-                user_input = unicodedata.normalize("NFKC", user_input)
+            # --- BRANCH A: Direct Event Bus Injection ---
+            if "inject_event" in step:
+                event_cfg = step["inject_event"]
+                topic = event_cfg["topic"]
+                payload = dict(event_cfg.get("payload", {}))
+                # Default user_id to the scenario's resolved user if omitted
+                payload.setdefault("user_id", user_id)
+                settle_time = event_cfg.get("settle_time", 0.1)
 
-            # Track start time using perf_counter for high resolution
-            start_time = time.perf_counter()
+                # Reset mock before injecting so we only capture events from this step
+                mock_conn_mgr.submit_external_event.reset_mock()
 
-            # Programmatic code execution bypassing AsyncConsoleReader/sys.stdin
-            actual_response = await agent.ainvoke(user_input)
+                await app_services.event_bus.inject_test_event(
+                    topic=topic,
+                    payload=payload,
+                    settle_time=settle_time,
+                )
 
-            # Track end time, calculate duration, and append to list
-            end_time = time.perf_counter()
-            step_duration = end_time - start_time
+                # Extract pushed payload (or pass through agent.handle_push_event if testing full LLM response)
+                if mock_conn_mgr.submit_external_event.called:
+                    pushed_payload = mock_conn_mgr.submit_external_event.call_args[0][0]
+                    # Option 1: Validate the raw pushed text directly:
+                    actual_response = pushed_payload.get("text", json.dumps(pushed_payload))
+                    # Option 2: Or feed it through the agent's push handler to test the LLM's spoken alert:
+                    # actual_response = await agent.handle_push_event(pushed_payload)
+                else:
+                    actual_response = ""
+
+                step_label = f"[EVENT INJECT: {topic}]"
+
+            elif "wait_for_response" in step:
+                config = step["wait_for_response"] or {}
+                timeout = config.get("timeout", 30)
+                if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
+                    raise ValueError("wait_for_response timeout must be a positive number")
+                try:
+                    pushed_payload = await asyncio.wait_for(pushed_events.get(), timeout=timeout)
+                except asyncio.TimeoutError as exc:
+                    raise TimeoutError(f"Timed out waiting for a pushed response after {timeout} seconds") from exc
+                actual_response = await agent.handle_push_event(pushed_payload)
+                step_label = "[WAIT FOR RESPONSE]"
+
+            elif "advance_time" in step:
+                if frozen_time is None:
+                    raise ValueError(
+                        f"Step {index} uses 'advance_time', but scenario '{testcase_name}' has no 'freeze_time' configured."
+                    )
+
+                time_cfg = step["advance_time"]
+                if "to" in time_cfg:
+                    frozen_time.move_to(time_cfg["to"])
+                    step_label = f"[ADVANCE TIME -> {time_cfg['to']}]"
+                else:
+                    delta = timedelta(
+                        hours=time_cfg.get("hours", 0),
+                        minutes=time_cfg.get("minutes", 0),
+                        seconds=time_cfg.get("seconds", 0),
+                    )
+                    frozen_time.tick(delta=delta)
+                    step_label = f"[ADVANCE TIME +{delta}]"
+
+                # Interrupt PersistentTimeScheduler's sleep so newly due reminders evaluate immediately
+                if app_services.time_scheduler:
+                    app_services.time_scheduler.wake()
+
+                # Brief yield to let the scheduler loop process the newly due task
+                await asyncio.sleep(time_cfg.get("settle_time", 0.2))
+                actual_response = ""
+
+            # --- BRANCH B: Standard User Chat Input ---
+            elif "user_input" in step:
+                user_input = step["user_input"]
+                if isinstance(user_input, str):
+                    user_input = unicodedata.normalize("NFKC", user_input)
+                actual_response = await agent.ainvoke(user_input)
+                step_label = user_input
+            else:
+                raise ValueError(
+                    f"Step {index} in testcase '{testcase_name}' has no recognized action."
+                )
+
+            step_duration = time.clock_gettime(time.CLOCK_MONOTONIC) - start_time
             execution_times.append(step_duration)
 
-            # Normalize LLM Output
             if isinstance(actual_response, str):
-                # Safely converts \u202f, \xa0, etc. into standard spaces " "
-                # without destroying newlines (\n)
                 actual_response = unicodedata.normalize("NFKC", actual_response)
             responses.append(actual_response)
 
-            # Fire off pluggable validators conditionally
+            # Run existing validators unchanged
             for validator_fn in validators:
-                # use the same model for validation as the one under test
                 sig = inspect.signature(validator_fn)
                 kwargs = {}
                 if "model_name" in sig.parameters:
                     kwargs["model_name"] = SEMANTIC_VALIDATOR_MODEL or model_name
 
                 if inspect.iscoroutinefunction(validator_fn):
-                    # Natively await async validators (like semantic evaluations or graph checks)
                     await validator_fn(actual_response, app_services.db_client, **kwargs)
                 else:
-                    # Execute standard synchronous substring/regex assertions directly
                     validator_fn(actual_response, app_services.db_client, **kwargs)
 
             step_results.append(StepResult(
                 step=index,
-                user_input=user_input,
+                user_input=step_label,
                 actual_result=actual_response,
                 elapsed_time=step_duration
             ))
@@ -147,6 +238,19 @@ async def execute_scenario_workflow(
         success = True
 
     finally:
+        if app_services.time_scheduler:
+            await app_services.time_scheduler.stop()
+
+        if agent and user_id:
+            session_manager.unregister(user_id, agent)
+
+        if thread_id and app_services.db_client and scenario_request.config.getoption("--dump-checkpoints"):
+            try:
+                saver = AsyncNeo4jSaver(driver=app_services.db_client.driver)
+                await async_dump_thread_transcript(saver, thread_id, latest_only=True)
+            except Exception as exc:
+                print(f"[CHECKPOINT WARN] Failed to dump thread {thread_id}: {exc}")
+
         # Guarantee safe database connection pooling teardown
         if app_services.db_client:
             await app_services.db_client.close()

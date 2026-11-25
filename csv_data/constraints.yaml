@@ -2,6 +2,8 @@
 - CREATE CONSTRAINT unique_userID IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE;
 - CREATE INDEX queue_polling_idx IF NOT EXISTS FOR (t:Task) ON (t.status, t.due_time);
 - CREATE CONSTRAINT task_id_unique FOR (t:Task) REQUIRE t.id IS UNIQUE;
+- CREATE CONSTRAINT playbook_id_unique IF NOT EXISTS FOR (p:Playbook) REQUIRE p.id IS UNIQUE;
+- CREATE CONSTRAINT playbook_item_id_unique IF NOT EXISTS FOR (pi:PlaybookItem) REQUIRE pi.id IS UNIQUE;
 #- CREATE CONSTRAINT unique_year IF NOT EXISTS FOR (y:Year) REQUIRE y.year IS UNIQUE;
 #- CREATE CONSTRAINT unique_month_per_year IF NOT EXISTS FOR (m:Month) REQUIRE (m.year, m.month) IS UNIQUE;
 #- CREATE CONSTRAINT unique_day_per_date IF NOT EXISTS FOR (d:Day) REQUIRE (d.year, d.month, d.day) IS UNIQUE;
