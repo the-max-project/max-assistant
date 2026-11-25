@@ -21,6 +21,7 @@ from max_assistant.clients.ollama_preloader import create_llm_instance, preload_
 from max_assistant.tools import ALL_TOOL_PROVIDERS
 from max_assistant.tools.registry import ToolRegistry
 from max_assistant.tools.reminder_tools import ReminderTools
+from max_assistant.tools.schedule_tools import ScheduleTools
 from max_assistant.agent.graph import create_reasoning_engine
 from max_assistant.agent.session_mgr import session_manager
 
@@ -111,9 +112,9 @@ class AppServices:
                 event_bus=event_bus,
             )
 
-            # 3. Initialize and Populate Tool Registry (Injecting time_scheduler into providers)
+            # 3. Initialize and Populate Tool Registry
             tool_registry = cls._initialize_tool_registry(
-                db_client, llm, time_scheduler, playbook_service
+                db_client, llm, time_scheduler, playbook_service, event_bus
             )
 
             # 4. Create Reasoning Engine
@@ -136,7 +137,8 @@ class AppServices:
                 event_bus=event_bus,
                 session_mgr=session_manager,
                 db_client=db_client,
-                notification_router=notification_router
+                notification_router=notification_router,
+                playbook_service=playbook_service,
             )
 
             # 6. Return the fully configured container instance
@@ -195,7 +197,8 @@ class AppServices:
             db_client: Neo4jClient,
             llm: ChatOllama,
             time_scheduler: PersistentTimeScheduler,
-            playbook_service: PlaybookService
+            playbook_service: PlaybookService,
+            event_bus: LocalEventBus,
     ) -> ToolRegistry:
         logger.info("Initializing and populating tool registry...")
         tool_registry = ToolRegistry(db_client=db_client, llm=llm)
@@ -209,6 +212,11 @@ class AppServices:
             elif issubclass(provider_class, PlaybookTools) or provider_class is PlaybookTools:
                 provider_instance = provider_class(
                     db_client=db_client, playbook_service=playbook_service, llm=llm
+                )
+                tool_registry.register_instance(provider_instance)
+            elif issubclass(provider_class, ScheduleTools) or provider_class is ScheduleTools:
+                provider_instance = provider_class(
+                    db_client=db_client, llm=llm, event_bus=event_bus
                 )
                 tool_registry.register_instance(provider_instance)
             else:

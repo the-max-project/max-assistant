@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 from datetime import datetime
 import json
 
@@ -48,11 +48,11 @@ def playbook_service(mock_db_client, mock_llm, mock_time_scheduler, mock_event_b
 
 @pytest.mark.asyncio
 async def test_gather_daily_context_filters_past_events(playbook_service, mock_db_client):
-    """Verifies that events occurring before current_dt are excluded from LLM context."""
+    """Verifies that events occurring before current_dt are excluded from the LLM context."""
     current_dt = datetime(2026, 11, 17, 10, 0, 0)
     target_date = "2026-11-17"
 
-    async def db_side_effect(query, params):
+    async def db_side_effect(query, _params):
         if "Appointment" in query:
             return {"data": [
                 {"id": "1", "title": "Past Appt", "time": "09:00:00"},
@@ -89,7 +89,7 @@ async def test_generate_daily_playbook_llm_fallback(playbook_service, mock_db_cl
             "family_news": [{"id": "4", "headline": "Baby born!", "details": "A new baby"}]
         }
 
-        # Default empty queries (e.g. status updates or initial loads)
+        # Default empty queries (e.g., status updates or initial loads)
         mock_db_client.execute_query.return_value = {"data": []}
 
         playbook = await playbook_service.generate_daily_playbook("user_1", datetime(2026, 11, 17, 8, 0, 0))
@@ -120,8 +120,8 @@ async def test_persist_playbook_is_idempotent(playbook_service, mock_db_client):
     call_args = mock_db_client.execute_query.call_args[0]
     query = call_args[0]
 
-    assert "DETACH" in query
-    assert "DELETE old_item, old_task" in query
+    assert "DETACH DELETE oi" in query
+    assert "DETACH DELETE ot" in query
 
 
 @pytest.mark.asyncio
@@ -135,6 +135,7 @@ async def test_get_playbook_filters_and_sorts_items(playbook_service, mock_db_cl
                   {"id": "low", "category": "FAMILY_NEWS", "title": "News", "summary": "", "priority": 3}],
     }]}
     result = await playbook_service.get_playbook("u1", "2026-11-17")
+    assert result is not None
     assert [item.id for item in result.items] == ["early", "late", "untimed", "low"]
     assert result.morning_summary == ""
     assert mock_db_client.execute_query.call_args.args[1] == {"user_id": "u1", "date": "2026-11-17"}
@@ -151,6 +152,52 @@ async def test_get_or_create_uses_existing_or_generates(playbook_service):
     assert await playbook_service.get_or_create_playbook("u1", now) is existing
     playbook_service.get_playbook.assert_awaited_with(user_id="u1", target_date="2026-11-17")
     playbook_service.generate_daily_playbook.assert_awaited_once_with(user_id="u1", current_dt=now)
+
+
+@pytest.mark.asyncio
+async def test_get_remaining_items_returns_none_when_playbook_missing(playbook_service):
+    now = datetime(2026, 11, 17, 10)
+    playbook_service.get_or_create_playbook = AsyncMock(return_value=None)
+
+    pb, items = await playbook_service.get_remaining_items("u1", now)
+
+    assert pb is None
+    assert items == []
+    playbook_service.get_or_create_playbook.assert_awaited_once_with(user_id="u1", current_dt=now)
+
+
+@pytest.mark.asyncio
+async def test_get_remaining_items_filters_past_and_terminal_statuses_while_preserving_opt_ins(playbook_service):
+    now = datetime(2026, 11, 17, 10, 0)
+    pb = DailyPlaybook(
+        id="pb-u1-2026-11-17",
+        user_id="u1",
+        date="2026-11-17",
+        morning_summary="Calm morning",
+        items=[
+            PlaybookItem(id="past-meal", category="MEAL", title="Breakfast", summary="", event_time="08:30", status="SCHEDULED"),
+            PlaybookItem(id="declined-act", category="OPTIONAL_ACTIVITY", title="Bingo", summary="", event_time="15:00", status="DECLINED"),
+            PlaybookItem(id="expired-act", category="OPTIONAL_ACTIVITY", title="Walk", summary="", event_time="11:00", status="EXPIRED"),
+            PlaybookItem(id="completed-act", category="REQUIRED", title="Vitals", summary="", event_time="10:30", status="COMPLETED"),
+            PlaybookItem(id="accepted-act", category="OPTIONAL_ACTIVITY", title="Chair Pilates", summary="", event_time="14:00", status="ACCEPTED", priority=5),
+            PlaybookItem(id="upcoming-meal", category="MEAL", title="Lunch", summary="", event_time="12:00", status="SCHEDULED", priority=8),
+            PlaybookItem(id="now-appt", category="REQUIRED", title="Checkup", summary="", event_time="10:00", status="SCHEDULED", priority=10),
+            PlaybookItem(id="prompted-news", category="FAMILY_NEWS", title="Sarah's Update", summary="", status="PROMPTED", priority=3),
+            PlaybookItem(id="queued-msg", category="FAMILY_MESSAGE", title="Note from John", summary="", status="QUEUED", priority=4),
+        ],
+    )
+    playbook_service.get_or_create_playbook = AsyncMock(return_value=pb)
+
+    returned_pb, remaining = await playbook_service.get_remaining_items("u1", now)
+
+    assert returned_pb is pb
+    assert [(i.id, i.status) for i in remaining] == [
+        ("now-appt", "SCHEDULED"),
+        ("upcoming-meal", "SCHEDULED"),
+        ("accepted-act", "ACCEPTED"),
+        ("queued-msg", "QUEUED"),
+        ("prompted-news", "PROMPTED"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -230,13 +277,18 @@ async def test_create_task_schedules_only_when_database_returns_id(playbook_serv
     ("25:00", None),
 ])
 def test_resolve_event_datetime_formats(playbook_service, value, expected):
-    assert playbook_service._resolve_event_datetime(datetime(2026, 11, 17).date(), value) == expected
+    assert playbook_service.resolve_event_datetime(datetime(2026, 11, 17).date(), value) == expected
 
 
 @pytest.mark.asyncio
 async def test_event_routes_single_user_and_all_users(playbook_service, mock_event_bus):
     now = datetime(2026, 11, 17, 10)
-    mock_event_bus.subscribe.assert_called_once()
+    mock_event_bus.subscribe.assert_has_calls([
+        call("playbook.generate", playbook_service.on_playbook_generate),
+        call("schedule.updated", playbook_service.on_schedule_updated),
+    ])
+    assert mock_event_bus.subscribe.call_count == 2
+
     playbook_service.generate_daily_playbook = AsyncMock()
     playbook_service.generate_for_all_users = AsyncMock()
     await playbook_service.on_playbook_generate("playbook.generate", {"date": now.isoformat(), "user_id": 42})
@@ -258,3 +310,103 @@ async def test_context_retains_boundary_missing_and_unparseable_times(playbook_s
     assert context["family_news"] == [{"id": "news"}]
     assert all(call.args[1] == {"user_id": "u1", "target_date": "2026-11-17"}
                for call in mock_db_client.execute_query.await_args_list)
+
+@pytest.mark.asyncio
+async def test_get_remaining_items_preserves_accepted_activities(playbook_service):
+    """Verifies mid-day schedule reads return ACCEPTED items intact without regenerating."""
+    now = datetime(2026, 11, 17, 13, 0)
+    accepted_item = PlaybookItem(
+        id="item-pilates",
+        category="OPTIONAL_ACTIVITY",
+        title="Chair Pilates",
+        summary="Chair Pilates at 14:00",
+        event_time="14:00",
+        status="ACCEPTED",
+        priority=5,
+    )
+    pb = DailyPlaybook(
+        id="pb-u1-2026-11-17",
+        user_id="u1",
+        date="2026-11-17",
+        morning_summary="Calm afternoon",
+        items=[accepted_item],
+    )
+    playbook_service.get_playbook = AsyncMock(return_value=pb)
+    playbook_service.generate_daily_playbook = AsyncMock()
+
+    returned_pb, remaining = await playbook_service.get_remaining_items("u1", now)
+
+    assert returned_pb is pb
+    assert len(remaining) == 1
+    assert remaining[0].id == "item-pilates"
+    assert remaining[0].status == "ACCEPTED"
+    playbook_service.generate_daily_playbook.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_daily_playbook_adds_new_appointment_and_preserves_declined_activity(
+    playbook_service, mock_db_client, mock_time_scheduler
+):
+    """
+    Verifies sync_daily_playbook:
+    - Preserves DECLINED/ACCEPTED items without overwriting status
+    - Adds newly created afternoon appointments and schedules their reminders
+    - Expires removed SCHEDULED items and cancels their spawned tasks in time_scheduler
+    """
+    now = datetime(2026, 11, 17, 11, 0)
+    existing_pb = DailyPlaybook(
+        id="pb-u1-2026-11-17",
+        user_id="u1",
+        date="2026-11-17",
+        morning_summary="Morning summary",
+        items=[
+            PlaybookItem(
+                id="item-declined",
+                category="OPTIONAL_ACTIVITY",
+                title="Bingo",
+                summary="Bingo at 15:00",
+                event_time="15:00",
+                status="DECLINED",
+                priority=5,
+            ),
+            PlaybookItem(
+                id="item-cancelled",
+                category="REQUIRED",
+                title="Old Lab Visit",
+                summary="Old Lab Visit at 13:00",
+                event_time="13:00",
+                status="SCHEDULED",
+                priority=10,
+            ),
+        ],
+    )
+
+    playbook_service.get_playbook = AsyncMock(return_value=existing_pb)
+    playbook_service._load_care_config = AsyncMock(return_value=CareAdminConfig(appointment_lead_minutes=30, departure_lead_minutes=0))
+    playbook_service._gather_daily_context = AsyncMock(return_value={
+        "appointments": [{"id": "appt-new", "title": "Eye Doctor", "time": "16:00"}],
+        "routines": [{"id": "r-bingo", "title": "Bingo", "time": "15:00", "type": "activity"}],
+        "family_messages": [],
+        "family_news": [],
+    })
+    playbook_service.create_and_schedule_task = AsyncMock()
+
+    mock_db_client.execute_query.side_effect = [
+        {"data": [{"deleted_task_ids": ["task-old-lab"]}]},  # cancel removed item + task
+        {"data": []},  # insert new item
+        {"data": []},  # mark new item SCHEDULED
+    ]
+
+    await playbook_service.sync_daily_playbook("u1", now)
+
+    # 1. Cancelled item's task evicted from heap
+    mock_time_scheduler.cancel_tasks.assert_called_once_with(["task-old-lab"])
+
+    # 2. Only the newly added appointment was inserted (declined Bingo was untouched)
+    insert_call_params = mock_db_client.execute_query.await_args_list[1].args[1]
+    inserted_titles = [item["title"] for item in insert_call_params["items"]]
+    assert inserted_titles == ["Eye Doctor"]
+
+    # 3. Prep reminder scheduled for the newly added appointment (16:00 - 30m = 15:30)
+    playbook_service.create_and_schedule_task.assert_awaited_once()
+    assert playbook_service.create_and_schedule_task.await_args.kwargs["due_dt"] == datetime(2026, 11, 17, 15, 30)

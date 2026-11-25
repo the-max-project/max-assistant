@@ -36,7 +36,8 @@ def test_initialize_tool_registry_registers_providers():
     llm = MagicMock()
     fake_registry = MagicMock()
     fake_time_scheduler = MagicMock()
-    fake_playbook_service = MagicMock()  # <--- Add a mock for playbook_service
+    fake_playbook_service = MagicMock()
+    fake_event_bus = MagicMock()
 
     # Create dummy classes with __name__ attributes to satisfy the logger engine
     class MockProvider1: pass
@@ -50,7 +51,8 @@ def test_initialize_tool_registry_registers_providers():
             db_client,
             llm,
             fake_time_scheduler,
-            fake_playbook_service
+            fake_playbook_service,
+            fake_event_bus,
         )
 
     assert result is fake_registry

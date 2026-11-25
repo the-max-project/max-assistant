@@ -20,6 +20,7 @@ TOPIC_PLAYBOOK_GENERATED = "playbook.generated"
 TOPIC_PLAYBOOK_ITEM_READY = "playbook.item.ready"
 TOPIC_USER_ENGAGEMENT_IDLE = "user.engagement.idle"
 TOPIC_USER_WOKE_UP = "user.woke_up"
+TOPIC_SCHEDULE_UPDATED = "schedule.updated"
 
 # Sensor, State & Scheduler Topics
 TOPIC_TASK_DUE = "task.due"

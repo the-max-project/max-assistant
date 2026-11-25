@@ -5,11 +5,13 @@ import heapq
 import time
 from datetime import datetime, timedelta
 import logging
+from typing import Iterable
 
 from max_assistant.clients.neo4j_client import Neo4jClientError, Neo4jCircuitBreakerError
 from max_assistant.events.bus import TOPIC_PLAYBOOK_GENERATE
 
 logger = logging.getLogger(__name__)
+
 
 class PersistentTimeScheduler:
     """Heap-based priority timer that evaluates validity and context before firing."""
@@ -21,6 +23,7 @@ class PersistentTimeScheduler:
         self.playbook_minute = playbook_minute
         # Heap item: (due_epoch, task_id, user_id, text, expires_epoch, can_wake_user)
         self._heap = []
+        self._cancelled_task_ids: set[str] = set()
         self._wake_event = asyncio.Event()
         self._cron_wake_event = asyncio.Event()
         self._running = False
@@ -32,7 +35,28 @@ class PersistentTimeScheduler:
         self._wake_event.set()
         self._cron_wake_event.set()
 
-    async def schedule(self, task_id: str, user_id: str, text: str, due_epoch: float, expires_epoch: float, can_wake_user: bool):
+    def cancel_tasks(self, task_ids: Iterable[str]) -> None:
+        """Marks superseded/deleted task IDs so they are evicted immediately from the heap."""
+        ids = {str(tid) for tid in task_ids if tid}
+        if not ids:
+            return
+        self._cancelled_task_ids.update(ids)
+        # Drop cancelled entries from the front of the heap immediately
+        while self._heap and self._heap[0][1] in self._cancelled_task_ids:
+            _, dropped_id, *_ = heapq.heappop(self._heap)
+            self._cancelled_task_ids.discard(dropped_id)
+        self._wake_event.set()
+
+    async def schedule(
+        self,
+        task_id: str,
+        user_id: str,
+        text: str,
+        due_epoch: float,
+        expires_epoch: float,
+        can_wake_user: bool,
+    ):
+        self._cancelled_task_ids.discard(str(task_id))
         heapq.heappush(self._heap, (due_epoch, task_id, user_id, text, expires_epoch, can_wake_user))
         self._wake_event.set()
 
@@ -91,23 +115,36 @@ class PersistentTimeScheduler:
             result = await self.db_client.execute_query(query, {})
             for record in result.get("data", []):
                 due_dt = datetime.fromisoformat(str(record["due_time"]))
-                exp_dt = datetime.fromisoformat(str(record["expires_at"])) if record.get("expires_at") else due_dt + timedelta(hours=2)
+                exp_dt = (
+                    datetime.fromisoformat(str(record["expires_at"]))
+                    if record.get("expires_at")
+                    else due_dt + timedelta(hours=2)
+                )
                 can_wake = bool(record.get("can_wake", False))
 
-                heapq.heappush(self._heap, (
-                    due_dt.timestamp(),
-                    record["id"],
-                    record["user_id"],
-                    record["text"],
-                    exp_dt.timestamp(),
-                    can_wake
-                ))
+                heapq.heappush(
+                    self._heap,
+                    (
+                        due_dt.timestamp(),
+                        record["id"],
+                        record["user_id"],
+                        record["text"],
+                        exp_dt.timestamp(),
+                        can_wake,
+                    ),
+                )
             logger.info(f"TimeScheduler: Hydrated {len(self._heap)} pending tasks from Neo4j.")
         except (Neo4jCircuitBreakerError, Neo4jClientError) as e:
             logger.error(f"TimeScheduler: Failed to hydrate from Neo4j: {e}")
 
     async def _run_loop(self):
         while self._running:
+            # Purge any cancelled tasks sitting at the head of the heap
+            while self._heap and self._heap[0][1] in self._cancelled_task_ids:
+                _, dropped_id, *_ = heapq.heappop(self._heap)
+                self._cancelled_task_ids.discard(dropped_id)
+                logger.debug(f"Task [{dropped_id}] evicted from scheduler heap (cancelled).")
+
             if not self._heap:
                 self._wake_event.clear()
                 await self._wake_event.wait()
@@ -136,18 +173,23 @@ class PersistentTimeScheduler:
                     heapq.heappop(self._heap)
                     claimed = await self._set_task_status(task_id, "COMPLETED")
                     if claimed:
-                        await self.event_bus.publish("task.due", {
-                            "task_id": task_id,
-                            "user_id": user_id,
-                            "text": text
-                        })
+                        await self.event_bus.publish(
+                            "task.due",
+                            {
+                                "task_id": task_id,
+                                "user_id": user_id,
+                                "text": text,
+                            },
+                        )
                     else:
                         logger.debug(
                             f"Task [{task_id}] no longer PENDING in Neo4j (deleted or superseded). Skipping delivery."
                         )
                 else:
                     # User is away or asleep: leave task in the heap, retry in 30s
-                    logger.debug(f"Task [{task_id}] deferred: presence={is_present}, asleep={is_asleep}, can_wake={can_wake}")
+                    logger.debug(
+                        f"Task [{task_id}] deferred: presence={is_present}, asleep={is_asleep}, can_wake={can_wake}"
+                    )
                     self._wake_event.clear()
                     try:
                         # Wait 30 seconds or until woken by a presence/state transition

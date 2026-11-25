@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import uuid
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -19,6 +19,7 @@ from max_assistant.events.bus import (
     LocalEventBus,
     TOPIC_PLAYBOOK_GENERATE,
     TOPIC_PLAYBOOK_GENERATED,
+    TOPIC_SCHEDULE_UPDATED,
 )
 from max_assistant.models.playbook_models import (
     CareAdminConfig,
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 class PlaybookService:
-    """Generates and persists daily playbooks and registers required reminders."""
+    """Generates, syncs, and persists daily playbooks and registers required reminders."""
 
     def __init__(
             self,
@@ -45,18 +46,29 @@ class PlaybookService:
         self.event_bus = event_bus
 
         self.event_bus.subscribe(TOPIC_PLAYBOOK_GENERATE, self.on_playbook_generate)
+        self.event_bus.subscribe(TOPIC_SCHEDULE_UPDATED, self.on_schedule_updated)
 
     async def on_playbook_generate(self, _topic: str, data: dict) -> None:
         """EventBus handler for `playbook.generate`."""
         target_date_str = data.get("date")
-        # Explicit string cast fixes the 'Any | None' type warning
-        current_dt = datetime.fromisoformat(str(target_date_str)) if target_date_str else datetime.now()
+        current_dt = datetime.fromisoformat(str(target_date_str)).replace(tzinfo=None) if target_date_str else datetime.now()
         user_id = data.get("user_id")
 
         if user_id:
             await self.generate_daily_playbook(user_id=str(user_id), current_dt=current_dt)
         else:
             await self.generate_for_all_users(current_dt=current_dt)
+
+    async def on_schedule_updated(self, _topic: str, data: dict) -> None:
+        """EventBus handler for `schedule.updated` to non-destructively sync today's Playbook."""
+        user_id = data.get("user_id")
+        if not user_id:
+            return
+        target_date_str = data.get("date")
+        now = datetime.now()
+        if target_date_str and str(target_date_str)[:10] != now.date().isoformat():
+            return  # Only sync today's active Playbook
+        await self.sync_daily_playbook(user_id=str(user_id), current_dt=now)
 
     async def generate_for_all_users(self, current_dt: Optional[datetime] = None) -> List[DailyPlaybook]:
         """Generates daily playbooks for all :User nodes in Neo4j."""
@@ -73,8 +85,11 @@ class PlaybookService:
 
         return playbooks
 
-    async def get_or_create_playbook(self, user_id: str, current_dt: Optional[datetime] = None) -> Optional[
-        DailyPlaybook]:
+    async def get_or_create_playbook(
+            self,
+            user_id: str,
+            current_dt: Optional[datetime] = None,
+    ) -> Optional[DailyPlaybook]:
         """Fetches today's existing Playbook from Neo4j, or synthesizes one if missing."""
         current_dt = current_dt or datetime.now()
         date_str = current_dt.date().isoformat()
@@ -90,7 +105,7 @@ class PlaybookService:
                 MATCH (u:User {id: $user_id})-[:HAS_PLAYBOOK]->(p:Playbook {date: $date})
                 OPTIONAL MATCH (p)-[:HAS_ITEM]->(item:PlaybookItem)
                 RETURN p.id AS id, p.date AS date, p.morning_summary AS morning_summary,
-                collect(properties(item)) AS items LIMIT 1 \
+                collect(properties(item)) AS items LIMIT 1
                 """
         res = await self.db_client.execute_query(query, {"user_id": user_id, "date": target_date})
         data = res.get("data", [])
@@ -110,8 +125,179 @@ class PlaybookService:
             items=items,
         )
 
-    async def generate_daily_playbook(self, user_id: str, current_dt: Optional[datetime] = None) -> Optional[
-        DailyPlaybook]:
+    async def get_remaining_items(
+            self,
+            user_id: str,
+            current_dt: Optional[datetime] = None,
+    ) -> Tuple[Optional[DailyPlaybook], List[PlaybookItem]]:
+        """
+        Non-destructively loads today's Playbook (creating it once if absent) and filters
+        items in Python to return only active upcoming events without wiping user decisions.
+        """
+        current_dt = current_dt or datetime.now()
+        playbook = await self.get_or_create_playbook(user_id=user_id, current_dt=current_dt)
+        if playbook is None:
+            return None, []
+
+        base_date = current_dt.date()
+        remaining: List[PlaybookItem] = []
+
+        for item in playbook.items:
+            if item.status in ("DECLINED", "EXPIRED", "COMPLETED"):
+                continue
+
+            if item.event_time:
+                event_dt = self.resolve_event_datetime(base_date, str(item.event_time))
+                if event_dt is not None and event_dt < current_dt:
+                    continue
+
+            remaining.append(item)
+
+        remaining.sort(key=lambda x: (x.event_time or "23:59", -x.priority))
+        return playbook, remaining
+
+    @staticmethod
+    def _item_sync_key(item: PlaybookItem) -> Tuple[str, str, str]:
+        """Normalizes a PlaybookItem into a stable key for non-destructive midday reconciliation."""
+        return (
+            str(item.category),
+            str(item.title).strip().lower(),
+            str(item.event_time or "").strip(),
+        )
+
+    async def sync_daily_playbook(
+            self,
+            user_id: str,
+            current_dt: Optional[datetime] = None,
+    ) -> Optional[DailyPlaybook]:
+        """
+        Non-destructively reconciles today's Playbook against current Neo4j appointments/routines:
+        - Preserves ACCEPTED, DECLINED, PROMPTED, and COMPLETED items untouched.
+        - Adds newly scheduled items and registers reminders for new mandatory items.
+        - Expires SCHEDULED/QUEUED items whose underlying calendar event was removed, cancelling their tasks.
+        """
+        current_dt = current_dt or datetime.now()
+        date_str = current_dt.date().isoformat()
+
+        existing = await self.get_playbook(user_id=user_id, target_date=date_str)
+        if existing is None:
+            return await self.generate_daily_playbook(user_id=user_id, current_dt=current_dt)
+
+        care_cfg = await self._load_care_config(user_id)
+        context = await self._gather_daily_context(user_id, date_str, current_dt)
+        fresh_playbook = self._deterministic_fallback(user_id, date_str, care_cfg, context)
+
+        fresh_by_key = {self._item_sync_key(item): item for item in fresh_playbook.items}
+        existing_keys = {self._item_sync_key(item) for item in existing.items}
+
+        # 1. Identify new items to insert
+        added_items: List[PlaybookItem] = [
+            item for key, item in fresh_by_key.items() if key not in existing_keys
+        ]
+
+        # 2. Identify active SCHEDULED/QUEUED items whose source event was removed or rescheduled
+        base_date = current_dt.date()
+        removed_item_ids: List[str] = []
+        for item in existing.items:
+            if item.status not in ("QUEUED", "SCHEDULED"):
+                continue  # Never overwrite ACCEPTED, DECLINED, PROMPTED, or COMPLETED decisions
+            if self._item_sync_key(item) in fresh_by_key:
+                continue
+            # Only cancel upcoming items (past items naturally age out)
+            if item.event_time:
+                event_dt = self.resolve_event_datetime(base_date, str(item.event_time))
+                if event_dt is not None and event_dt < current_dt:
+                    continue
+            removed_item_ids.append(item.id)
+
+        if removed_item_ids:
+            # language=Cypher
+            cancel_query = """
+            MATCH (u:User {id: $user_id})-[:HAS_PLAYBOOK]->(p:Playbook {id: $playbook_id})-[:HAS_ITEM]->(pi:PlaybookItem)
+            WHERE pi.id IN $item_ids
+            SET pi.status = 'EXPIRED', pi.updated_at = datetime($updated_at)
+            WITH pi
+            OPTIONAL MATCH (pi)-[:SPAWNED_TASK]->(t:Task)
+            WITH [task IN collect(DISTINCT t) WHERE task IS NOT NULL | task.id] AS deleted_task_ids,
+                 collect(DISTINCT t) AS tasks
+            FOREACH (task IN tasks | DETACH DELETE task)
+            RETURN deleted_task_ids
+            """
+            res = await self.db_client.execute_query(
+                cancel_query,
+                {
+                    "user_id": user_id,
+                    "playbook_id": existing.id,
+                    "item_ids": removed_item_ids,
+                    "updated_at": current_dt.isoformat(),
+                },
+            )
+            self._cancel_deleted_tasks(res)
+
+        if added_items:
+            # language=Cypher
+            insert_query = """
+            MATCH (u:User {id: $user_id})-[:HAS_PLAYBOOK]->(p:Playbook {id: $playbook_id})
+            SET p.updated_at = datetime($updated_at)
+            WITH p
+            UNWIND $items AS item
+            CREATE (
+              pi:PlaybookItem {
+                id: item.id,
+                category: item.category,
+                title: item.title,
+                summary: item.summary,
+                event_time: item.event_time,
+                lead_minutes: item.lead_minutes,
+                validity_minutes: item.validity_minutes,
+                priority: item.priority,
+                status: item.status,
+                sender: item.sender,
+                room: item.room,
+                updated_at: datetime($updated_at)
+              }
+            )
+            CREATE (p)-[:HAS_ITEM]->(pi)
+            """
+            await self.db_client.execute_query(
+                insert_query,
+                {
+                    "user_id": user_id,
+                    "playbook_id": existing.id,
+                    "updated_at": current_dt.isoformat(),
+                    "items": [item.model_dump() for item in added_items],
+                },
+            )
+
+            # Schedule reminders only for newly added mandatory items
+            added_subset = DailyPlaybook(
+                id=existing.id,
+                user_id=user_id,
+                date=date_str,
+                morning_summary=existing.morning_summary,
+                items=added_items,
+            )
+            await self._schedule_required_reminders(added_subset, care_cfg, current_dt)
+
+        logger.info(
+            f"PlaybookService: Synced playbook '{existing.id}' "
+            f"(+{len(added_items)} added, -{len(removed_item_ids)} expired)."
+        )
+        return await self.get_playbook(user_id=user_id, target_date=date_str)
+
+    def _cancel_deleted_tasks(self, res: Any) -> None:
+        """Evicts any deleted task IDs returned by Neo4j from PersistentTimeScheduler."""
+        data = res.get("data", []) if isinstance(res, dict) else []
+        if data and self.time_scheduler is not None and hasattr(self.time_scheduler, "cancel_tasks"):
+            deleted_ids = data[0].get("deleted_task_ids") or []
+            if deleted_ids:
+                self.time_scheduler.cancel_tasks(deleted_ids)
+
+    async def generate_daily_playbook(
+            self,
+            user_id: str,
+            current_dt: Optional[datetime] = None,
+    ) -> Optional[DailyPlaybook]:
         """Builds a structured DailyPlaybook trimmed to the current time, persists it, and schedules reminders."""
         current_dt = current_dt or datetime.now()
         date_str = current_dt.date().isoformat()
@@ -150,7 +336,7 @@ class PlaybookService:
         query = """
                 MATCH (u:User {id: $user_id})
                 OPTIONAL MATCH (u)-[:HAS_CARE_PROFILE]->(cp:CareProfile)
-                RETURN properties(cp) AS care_profile LIMIT 1 \
+                RETURN properties(cp) AS care_profile LIMIT 1
                 """
         res = await self.db_client.execute_query(query, {"user_id": user_id})
         data = res.get("data", [])
@@ -166,7 +352,7 @@ class PlaybookService:
                   WITH date($target_date) AS dt
                   MATCH (u:User {id: $user_id})-[:HAS_YEAR]->(:Year {year: dt.year})-[:HAS_MONTH]->(:Month {month: dt.month})-[:HAS_DAY]->(:Day {day: dt.day})-[:HAS_APPOINTMENT]->(appt:Appointment)
                   RETURN appt.id AS id, appt.title AS title, toString(appt.time) AS time,
-                  appt.duration AS duration, appt.details AS details \
+                  appt.duration AS duration, appt.details AS details
                   """
 
         # 2. Daily Routines (No time logic in Cypher)
@@ -174,11 +360,11 @@ class PlaybookService:
         q_routines = """
                      WITH date($target_date) AS dt
                      WITH CASE dt.dayOfWeek
-                       WHEN 1 THEN 'Monday' 
-                       WHEN 2 THEN 'Tuesday' 
+                       WHEN 1 THEN 'Monday'
+                       WHEN 2 THEN 'Tuesday'
                        WHEN 3 THEN 'Wednesday'
-                       WHEN 4 THEN 'Thursday' 
-                       WHEN 5 THEN 'Friday' 
+                       WHEN 4 THEN 'Thursday'
+                       WHEN 5 THEN 'Friday'
                        WHEN 6 THEN 'Saturday'
                        ELSE 'Sunday'
                      END AS dow
@@ -187,7 +373,7 @@ class PlaybookService:
                      AND (r.startDate IS NULL OR r.startDate <= date($target_date))
                      AND (r.endDate IS NULL OR r.endDate >= date($target_date))
                      RETURN r.id AS id, r.title AS title, r.type AS type, toString(r.time) AS time,
-                     r.duration AS duration, r.room AS room, r.details AS details, r.rating AS rating \
+                     r.duration AS duration, r.room AS room, r.details AS details, r.rating AS rating
                      """
 
         # 3. Unplayed Family Messages
@@ -195,7 +381,7 @@ class PlaybookService:
         q_messages = """
                      MATCH (u:User {id: $user_id})-[:HAS_MESSAGE]->(m:FamilyMessage)
                      WHERE coalesce(m.status, 'UNREAD') = 'UNREAD'
-                     RETURN m.id AS id, m.sender AS sender, m.text AS text, toString(m.created_at) AS created_at LIMIT 5 \
+                     RETURN m.id AS id, m.sender AS sender, m.text AS text, toString(m.created_at) AS created_at LIMIT 5
                      """
 
         # 4. Recent Family News
@@ -203,7 +389,7 @@ class PlaybookService:
         q_news = """
                  MATCH (u:User {id: $user_id})-[:HAS_NEWS]->(n:FamilyNews)
                  WHERE coalesce(n.shared_count, 0) < 2
-                 RETURN n.id AS id, n.headline AS headline, n.details AS details LIMIT 5 \
+                 RETURN n.id AS id, n.headline AS headline, n.details AS details LIMIT 5
                  """
 
         params = {"user_id": user_id, "target_date": target_date}
@@ -212,13 +398,10 @@ class PlaybookService:
         msgs_res = await self.db_client.execute_query(q_messages, params)
         news_res = await self.db_client.execute_query(q_news, params)
 
-        # ---------------------------------------------------------
-        # Filter out passed events in Python (Testable & Deterministic)
-        # ---------------------------------------------------------
         def is_upcoming(time_str: Optional[str]) -> bool:
             if not time_str:
                 return True
-            event_datetime = self._resolve_event_datetime(current_dt.date(), time_str)
+            event_datetime = self.resolve_event_datetime(current_dt.date(), time_str)
             return event_datetime is None or event_datetime >= current_dt
 
         upcoming_appts = [a for a in appts_res.get("data", []) if is_upcoming(a.get("time"))]
@@ -386,14 +569,22 @@ class PlaybookService:
     def _build_fallback_summary(target_date: str, items: List[PlaybookItem]) -> str:
         dt = datetime.fromisoformat(target_date)
         day_name = dt.strftime("%A, %B %d")
+        meals = [i for i in items if i.category == "MEAL"]
         required = [i for i in items if i.category in ("REQUIRED", "MEDICATION")]
+
+        parts = [f"Good morning! Today is {day_name}."]
+        if meals:
+            first_meal = meals[0]
+            parts.append(f"We start with {first_meal.title} at {first_meal.event_time or 'this morning'}.")
         if required:
-            first = required[0]
-            return f"Good morning! Today is {day_name}. Your main event today is {first.title} at {first.event_time or 'later today'}."
-        return f"Good morning! Today is {day_name}. You have a relaxed schedule ahead today."
+            first_req = required[0]
+            parts.append(f"Later on, you have {first_req.title} at {first_req.event_time or 'later today'}.")
+        elif not meals:
+            parts.append("You have a relaxed schedule ahead today.")
+        return " ".join(parts)
 
     async def _persist_playbook(self, playbook: DailyPlaybook, current_dt: datetime) -> None:
-        """Persists the Playbook using a Python-provided timestamp and deletes old pending tasks."""
+        """Persists the Playbook, deletes old pending tasks, and evicts them from PersistentTimeScheduler."""
         # language=Cypher
         query = """
                 MATCH (u:User {id: $user_id})
@@ -404,16 +595,18 @@ class PlaybookService:
                 MERGE (u)-[:HAS_PLAYBOOK]->(p)
                 WITH p
 
-                // Wipe old playbook items and their spawned tasks to prevent duplicate alarms
+                // Collect superseded task IDs before deleting old items/tasks
                 OPTIONAL MATCH (p)-[:HAS_ITEM]->(old_item:PlaybookItem)
                 OPTIONAL MATCH (old_item)-[:SPAWNED_TASK]->(old_task:Task)
-                DETACH \
-                DELETE old_item, old_task
-                WITH DISTINCT p
+                WITH p, collect(DISTINCT old_item) AS old_items, collect(DISTINCT old_task) AS old_tasks,
+                     [t IN collect(DISTINCT old_task) WHERE t IS NOT NULL | t.id] AS deleted_task_ids
+                FOREACH (oi IN old_items | DETACH DELETE oi)
+                FOREACH (ot IN old_tasks | DETACH DELETE ot)
+                WITH p, deleted_task_ids
 
                 // Insert new trimmed schedule
                 UNWIND $items AS item
-                CREATE ( \
+                CREATE (
                   pi:PlaybookItem {
                     id: item.id,
                     category: item.category,
@@ -427,11 +620,12 @@ class PlaybookService:
                     sender: item.sender,
                     room: item.room,
                     updated_at: datetime($updated_at)
-                  } \
+                  }
                 )
-                CREATE (p)-[:HAS_ITEM]->(pi) \
+                CREATE (p)-[:HAS_ITEM]->(pi)
+                RETURN deleted_task_ids
                 """
-        await self.db_client.execute_query(
+        res = await self.db_client.execute_query(
             query,
             {
                 "user_id": playbook.user_id,
@@ -442,6 +636,7 @@ class PlaybookService:
                 "items": [item.model_dump() for item in playbook.items],
             },
         )
+        self._cancel_deleted_tasks(res)
 
     async def _schedule_required_reminders(self, playbook: DailyPlaybook, care_cfg: CareAdminConfig,
                                            current_dt: datetime) -> None:
@@ -452,7 +647,7 @@ class PlaybookService:
             if item.category not in ("REQUIRED", "MEDICATION", "MEAL") or not item.event_time:
                 continue
 
-            event_dt = self._resolve_event_datetime(base_date, item.event_time)
+            event_dt = self.resolve_event_datetime(base_date, item.event_time)
             if event_dt is None:
                 continue
 
@@ -510,7 +705,7 @@ class PlaybookService:
                 MATCH (u:User {id: $user_id})
                 MATCH (pi:PlaybookItem {id: $item_id})
                 WITH u, pi, datetime($due_time) AS d, datetime($expires_at) AS exp, datetime($created_at) AS cat
-                CREATE ( \
+                CREATE (
                   t:Task {
                     id: randomUUID(),
                     text: $text,
@@ -521,7 +716,7 @@ class PlaybookService:
                     status: 'PENDING',
                     source: 'PLAYBOOK',
                     created_at: cat
-                  } \
+                  }
                 )
                 MERGE (u)-[:HAS_YEAR]->(y:Year {year: d.year})
                 MERGE (y)-[:HAS_MONTH]->(m:Month {month: d.month, year: d.year})
@@ -529,7 +724,7 @@ class PlaybookService:
                 MERGE (m)-[:HAS_DAY]->(day:Day {day: d.day, month: d.month, year: d.year})
                 MERGE (day)-[:HAS_TASK]->(t)
                 MERGE (pi)-[:SPAWNED_TASK]->(t)
-                RETURN t.id AS task_id \
+                RETURN t.id AS task_id
                 """
         res = await self.db_client.execute_query(
             query,
@@ -554,7 +749,7 @@ class PlaybookService:
             )
 
     @staticmethod
-    def _resolve_event_datetime(base_date, time_str: str) -> Optional[datetime]:
+    def resolve_event_datetime(base_date, time_str: str) -> Optional[datetime]:
         clean = time_str.strip()
         for fmt in ("%H:%M:%S", "%H:%M", "%I:%M %p", "%I:%M%p"):
             try:
